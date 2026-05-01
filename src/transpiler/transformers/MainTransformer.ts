@@ -322,31 +322,35 @@ export function runTransformationPass(
                     });
                 }
             }
-            // Transform the right (iterable expression) - build $.get(scopedRef, 0).array
-            if (node.right && node.right.type === 'Identifier') {
-                // transformIdentifier may already wrap user variables in $.get($.var.X, 0).
-                // addArrayAccess reads the (stale) node.name and overwrites the result.
-                // Fix: call transformIdentifier, then only call addArrayAccess if the node
-                // wasn't already transformed (i.e. it's still an Identifier).
-                transformIdentifier(node.right, state);
+            // Transform the right (iterable expression) - build <expr>.array (or .array.entries() for destructuring)
+            if (node.right) {
                 if (node.right.type === 'Identifier') {
-                    // transformIdentifier didn't rename this (context-bound / built-in var)
-                    addArrayAccess(node.right, state);
+                    // transformIdentifier may already wrap user variables in $.get($.var.X, 0).
+                    // addArrayAccess reads the (stale) node.name and overwrites the result.
+                    // Fix: call transformIdentifier, then only call addArrayAccess if the node
+                    // wasn't already transformed (i.e. it's still an Identifier).
+                    transformIdentifier(node.right, state);
+                    if (node.right.type === 'Identifier') {
+                        // transformIdentifier didn't rename this (context-bound / built-in var)
+                        addArrayAccess(node.right, state);
+                    }
+                } else {
+                    // MemberExpression (e.g. eachDay.prices) or any other expression — recurse so
+                    // nested identifiers get transformed properly, then wrap with .array below.
+                    c(node.right, state);
                 }
 
-                // Access .array property for iteration over Pine Script arrays
-                // Build: $.get(X, 0).array
+                // Access .array for iteration over Pine Script arrays (PineArrayObject wraps
+                // the underlying JS array as .array). Build: <expr>.array
                 const currentRight = { ...node.right };
-                
-                // Create MemberExpression: currentRight.array
                 let arrayAccess = ASTFactory.createMemberExpression(
                     currentRight,
                     ASTFactory.createIdentifier('array'),
                     false
                 );
 
-                // If destructuring, add .entries()
-                if (node.left && node.left.type === 'VariableDeclaration' && 
+                // If destructuring, add .entries() so iteration yields [index, value] tuples
+                if (node.left && node.left.type === 'VariableDeclaration' &&
                     node.left.declarations[0].id.type === 'ArrayPattern') {
                     arrayAccess = ASTFactory.createCallExpression(
                         ASTFactory.createMemberExpression(
@@ -357,12 +361,9 @@ export function runTransformationPass(
                         []
                     );
                 }
-                
+
                 // Replace node.right with the new MemberExpression/CallExpression
                 Object.assign(node.right, arrayAccess);
-                
-            } else if (node.right) {
-                c(node.right, state);
             }
             // Inject loop guard: hoist counter declaration before the loop
             const forOfGuardName = state.getNextLoopGuardName();

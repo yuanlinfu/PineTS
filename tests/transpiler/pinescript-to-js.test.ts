@@ -1688,6 +1688,34 @@ plot(close)
         expect(jsCode).toContain('for (const [idx, x1] of $.get(X1, 0).array.entries())');
     });
 
+    it('should handle for-of destructuring over a member expression iterable', () => {
+        // Regression: iterating with [index, value] destructuring over a UDT field
+        // (e.g. eachDay.prices) must wrap the iterable as <expr>.array.entries()
+        // — not just <expr> — otherwise destructuring a scalar yielded by
+        // PineArrayObject's [Symbol.iterator] throws "is not iterable".
+        const code = `
+//@version=6
+indicator("For-Of Member Destructuring")
+
+type bucket
+    array<float> prices = na
+
+process(buckets) =>
+    for [i, b] in buckets
+        for [j, p] in b.prices
+            x = p
+
+plot(close)
+        `;
+
+        const result = transpile(code);
+        const jsCode = result.toString();
+
+        expect(jsCode).toBeDefined();
+        // Inner loop: member expression iterable must be suffixed with .array.entries()
+        expect(jsCode).toContain('for (const [j, p] of b.prices.array.entries())');
+    });
+
     it('should handle for-of loops with nested operations', () => {
         const code = `
 //@version=6
