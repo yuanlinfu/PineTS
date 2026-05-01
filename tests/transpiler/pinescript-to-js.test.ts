@@ -1420,7 +1420,7 @@ plot(close)
 
             expect(jsCode).toBeDefined();
             // The variable 'plus' should be renamed to avoid collision with function 'plus'
-            expect(jsCode).toContain('for (const x1 of $.get(X1, 0).array)');
+            expect(jsCode).toContain('for (const x1 of $.iter($.get(X1, 0)))');
         });
     });
 });
@@ -1640,7 +1640,7 @@ plot(close)
 
         expect(jsCode).toBeDefined();
         // Should contain for-of loop with $.get() on the iterable
-        expect(jsCode).toContain('for (const x1 of $.get(X1, 0).array)');
+        expect(jsCode).toContain('for (const x1 of $.iter($.get(X1, 0)))');
         // Should NOT contain malformed loop syntax
         expect(jsCode).not.toMatch(/for \([^)]+= undefined[^)]*of/);
     });
@@ -1663,7 +1663,7 @@ plot(close)
         const jsCode = result.toString();
 
         // The iterable should use $.get(), but the loop variable should not be transformed
-        expect(jsCode).toContain('for (const item of $.get(arr, 0).array)');
+        expect(jsCode).toContain('for (const item of $.iter($.get(arr, 0)))');
         expect(jsCode).not.toContain('$$.const.fn1_item');
     });
 
@@ -1685,14 +1685,14 @@ plot(close)
 
         expect(jsCode).toBeDefined();
         // Should contain for-of loop with .entries()
-        expect(jsCode).toContain('for (const [idx, x1] of $.get(X1, 0).array.entries())');
+        expect(jsCode).toContain('for (const [idx, x1] of $.entries($.get(X1, 0)))');
     });
 
     it('should handle for-of destructuring over a member expression iterable', () => {
         // Regression: iterating with [index, value] destructuring over a UDT field
-        // (e.g. eachDay.prices) must wrap the iterable as <expr>.array.entries()
-        // — not just <expr> — otherwise destructuring a scalar yielded by
-        // PineArrayObject's [Symbol.iterator] throws "is not iterable".
+        // (e.g. eachDay.prices) must route through $.entries() so the runtime can
+        // resolve the underlying array — otherwise destructuring a scalar yielded
+        // by PineArrayObject's [Symbol.iterator] throws "is not iterable".
         const code = `
 //@version=6
 indicator("For-Of Member Destructuring")
@@ -1712,8 +1712,60 @@ plot(close)
         const jsCode = result.toString();
 
         expect(jsCode).toBeDefined();
-        // Inner loop: member expression iterable must be suffixed with .array.entries()
-        expect(jsCode).toContain('for (const [j, p] of b.prices.array.entries())');
+        expect(jsCode).toContain('for (const [j, p] of $.entries(b.prices))');
+        // Outer loop too — destructuring over a function param identifier
+        expect(jsCode).toContain('for (const [i, b] of $.entries(');
+    });
+
+    it('should wrap non-destructuring iteration over a member expression with $.iter', () => {
+        // Regression: built-ins like box.all return plain JS arrays (not PineArrayObject).
+        // Previously the codegen emitted `<expr>.array` unconditionally for member-expr
+        // iterables, which broke `for element in box.all` because plain arrays have no
+        // `.array` field. The $.iter helper handles both shapes uniformly.
+        const code = `
+//@version=6
+indicator("ForOf MemberExpr Plain JS Array")
+
+if true
+    for element in box.all
+        element.delete()
+    for ln in line.all
+        ln.delete()
+
+plot(close)
+        `;
+
+        const result = transpile(code);
+        const jsCode = result.toString();
+
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toContain('for (const element of $.iter(box.all))');
+        expect(jsCode).toContain('for (const ln of $.iter(line.all))');
+        // Must NOT regress to the broken `.array` form
+        expect(jsCode).not.toContain('box.all.array');
+        expect(jsCode).not.toContain('line.all.array');
+    });
+
+    it('should handle for-of destructuring over a built-in plain JS array', () => {
+        // Symmetric to the non-destructuring case: `for [i, el] in box.all` must work
+        // even though box.all is a plain JS array (not a PineArrayObject).
+        const code = `
+//@version=6
+indicator("ForOf MemberExpr Destructuring Plain JS")
+
+if true
+    for [i, el] in box.all
+        x = i
+
+plot(close)
+        `;
+
+        const result = transpile(code);
+        const jsCode = result.toString();
+
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toContain('for (const [i, el] of $.entries(box.all))');
+        expect(jsCode).not.toContain('box.all.array');
     });
 
     it('should handle for-of loops with nested operations', () => {
@@ -1735,7 +1787,7 @@ plot(close)
         const jsCode = result.toString();
 
         expect(jsCode).toBeDefined();
-        expect(jsCode).toContain('for (const val of $.get(values, 0).array)');
+        expect(jsCode).toContain('for (const val of $.iter($.get(values, 0)))');
         // The temp variable inside the loop should be transformed
         expect(jsCode).toMatch(/\$\$\.let\.fn\d+_temp/);
     });
@@ -1762,8 +1814,8 @@ plot(close)
         const result = transpile(code);
         const jsCode = result.toString();
 
-        expect(jsCode).toContain('for (const x of $.get(arr1, 0).array)');
-        expect(jsCode).toContain('for (const y of $.get(arr2, 0).array)');
+        expect(jsCode).toContain('for (const x of $.iter($.get(arr1, 0)))');
+        expect(jsCode).toContain('for (const y of $.iter($.get(arr2, 0)))');
     });
 
     it('should handle for-of with array operations', () => {
@@ -1786,7 +1838,7 @@ plot(result)
         const jsCode = result.toString();
 
         expect(jsCode).toBeDefined();
-        expect(jsCode).toContain('for (const element of $.get(arr, 0).array)');
+        expect(jsCode).toContain('for (const element of $.iter($.get(arr, 0)))');
     });
 });
 

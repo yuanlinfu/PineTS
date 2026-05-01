@@ -322,7 +322,14 @@ export function runTransformationPass(
                     });
                 }
             }
-            // Transform the right (iterable expression) - build <expr>.array (or .array.entries() for destructuring)
+            // Transform the right (iterable expression) and wrap it with a runtime helper that
+            // resolves Pine collection iteration uniformly:
+            //   for x in coll       → for (const x of $.iter(coll))
+            //   for [i, x] in coll  → for (const [i, x] of $.entries(coll))
+            // $.iter / $.entries handle PineArrayObject (.array unwrap), plain JS arrays
+            // (built-ins like box.all), and pass-through for already-iterable values.
+            // Centralizing the resolution avoids special-casing the codegen for each iterable
+            // shape and removes the static-typing guesswork.
             if (node.right) {
                 if (node.right.type === 'Identifier') {
                     // transformIdentifier may already wrap user variables in $.get($.var.X, 0).
@@ -335,35 +342,27 @@ export function runTransformationPass(
                         addArrayAccess(node.right, state);
                     }
                 } else {
-                    // MemberExpression (e.g. eachDay.prices) or any other expression — recurse so
-                    // nested identifiers get transformed properly, then wrap with .array below.
+                    // MemberExpression / CallExpression / etc. — recurse so nested identifiers
+                    // get transformed before we wrap the whole expression below.
                     c(node.right, state);
                 }
 
-                // Access .array for iteration over Pine Script arrays (PineArrayObject wraps
-                // the underlying JS array as .array). Build: <expr>.array
+                const isDestructuring = node.left && node.left.type === 'VariableDeclaration' &&
+                    node.left.declarations[0].id.type === 'ArrayPattern';
+                const helperName = isDestructuring ? 'entries' : 'iter';
+
+                // Build: $.<helperName>(<currentRight>)
                 const currentRight = { ...node.right };
-                let arrayAccess = ASTFactory.createMemberExpression(
-                    currentRight,
-                    ASTFactory.createIdentifier('array'),
-                    false
+                const wrapped = ASTFactory.createCallExpression(
+                    ASTFactory.createMemberExpression(
+                        ASTFactory.createIdentifier('$'),
+                        ASTFactory.createIdentifier(helperName),
+                        false
+                    ),
+                    [currentRight]
                 );
 
-                // If destructuring, add .entries() so iteration yields [index, value] tuples
-                if (node.left && node.left.type === 'VariableDeclaration' &&
-                    node.left.declarations[0].id.type === 'ArrayPattern') {
-                    arrayAccess = ASTFactory.createCallExpression(
-                        ASTFactory.createMemberExpression(
-                            arrayAccess,
-                            ASTFactory.createIdentifier('entries'),
-                            false
-                        ),
-                        []
-                    );
-                }
-
-                // Replace node.right with the new MemberExpression/CallExpression
-                Object.assign(node.right, arrayAccess);
+                Object.assign(node.right, wrapped);
             }
             // Inject loop guard: hoist counter declaration before the loop
             const forOfGuardName = state.getNextLoopGuardName();

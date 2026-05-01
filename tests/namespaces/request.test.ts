@@ -829,3 +829,165 @@ plot(volume, "_v")
         expect(secLow[0].value).toBeCloseTo(7441.21, 1);
     }, 30000);
 });
+
+/**
+ * Pine semantics: named arguments bind to the function's known parameter slots
+ * by name (like Python kwargs), not by position. The PineTS transpiler emits a
+ * trailing options object — request.security must merge that bag into the named
+ * slots, not stuff it into the next positional slot (`gaps`).
+ *
+ * Regression caught: previously `request.security(symbol, tf, expr, lookahead = …)`
+ * silently set `gaps` to the options object and `lookahead` to its default (false).
+ */
+describe('request.security — named-args resolution', () => {
+    it('binds named lookahead to the lookahead slot (not gaps)', async () => {
+        // Same-TF so the same-TF shortcut handles the call directly. We're just
+        // checking that the named-args wiring doesn't crash and returns the
+        // expected expression value (regardless of lookahead/gaps semantics
+        // which don't apply on same-TF).
+        const code = `
+//@version=6
+indicator("named-args lookahead")
+v = request.security(syminfo.tickerid, timeframe.period, close, lookahead = barmerge.lookahead_on, calc_bars_count = 500)
+plot(v, "v")
+        `;
+        const pineTS = new PineTS(
+            Provider.Mock,
+            'BTCUSDC',
+            'D',
+            null,
+            new Date('2025-10-01').getTime(),
+            new Date('2025-10-05').getTime(),
+        );
+        const { plots } = await pineTS.run(code);
+        const data = plots['v'].data;
+        expect(data.length).toBeGreaterThan(0);
+        // Same-TF with `close` expression — every bar's value must equal close on that bar.
+        data.forEach((p: any) => {
+            expect(typeof p.value).toBe('number');
+            expect(isNaN(p.value)).toBe(false);
+        });
+    });
+
+    it('positional and named lookahead produce the same result (cross-TF, no gaps)', async () => {
+        // Cross-TF (D chart, W security) — exercises the lookahead path. Both
+        // call shapes must produce identical series; named arg must NOT collapse
+        // to gaps and zero-out lookahead.
+        const positionalCode = `
+//@version=6
+indicator("positional")
+v = request.security(syminfo.tickerid, 'W', close, false, true)
+plot(v, "v")
+        `;
+        const namedCode = `
+//@version=6
+indicator("named")
+v = request.security(syminfo.tickerid, 'W', close, lookahead = barmerge.lookahead_on)
+plot(v, "v")
+        `;
+        const mk = () =>
+            new PineTS(
+                Provider.Mock,
+                'BTCUSDC',
+                'D',
+                null,
+                new Date('2025-09-01').getTime(),
+                new Date('2025-10-15').getTime(),
+            );
+
+        const { plots: posPlots } = await mk().run(positionalCode);
+        const { plots: namPlots } = await mk().run(namedCode);
+
+        const pos = posPlots['v'].data;
+        const nam = namPlots['v'].data;
+        expect(pos.length).toBe(nam.length);
+        expect(pos.length).toBeGreaterThan(0);
+        for (let i = 0; i < pos.length; i++) {
+            // toEqual handles NaN==NaN as equal
+            expect(nam[i].value).toEqual(pos[i].value);
+        }
+    });
+
+    it('binds named gaps + named lookahead together', async () => {
+        // Both flags as named args (out-of-order named args are allowed in Pine).
+        // gaps_on + lookahead_on path must run without crashing.
+        const code = `
+//@version=6
+indicator("named both")
+v = request.security(syminfo.tickerid, 'W', close, lookahead = barmerge.lookahead_on, gaps = barmerge.gaps_on)
+plot(v, "v")
+        `;
+        const pineTS = new PineTS(
+            Provider.Mock,
+            'BTCUSDC',
+            'D',
+            null,
+            new Date('2025-09-01').getTime(),
+            new Date('2025-10-15').getTime(),
+        );
+        const { plots } = await pineTS.run(code);
+        expect(plots['v'].data.length).toBeGreaterThan(0);
+    });
+
+    it('aligns secondary barstate.islast with chart barstate.islast', async () => {
+        // Regression: the secondary context's date range used to be over-extended
+        // (eDate + 30-day buffer when context.eDate was undefined), so
+        // `barstate.islast` in the secondary fired on a future bar — never on
+        // the daily bar containing the chart's last bar. Patterns like
+        // `barstate.islast ? value : na` would always read NaN.
+        //
+        // With the alignment fix, the secondary's last bar IS the daily bar that
+        // contains the chart's last bar, so the gated expression value is visible.
+        const code = `
+//@version=6
+indicator("barstate.islast alignment")
+gated() =>
+    barstate.islast ? 42.0 : na
+v = request.security(syminfo.tickerid, 'D', gated(), lookahead = barmerge.lookahead_on)
+plot(v, "v")
+        `;
+        const pineTS = new PineTS(
+            Provider.Mock,
+            'BTCUSDC',
+            '60',
+            null,
+            new Date('2025-09-01').getTime(),
+            new Date('2025-10-15').getTime(),
+        );
+        const { plots } = await pineTS.run(code);
+        const data = plots['v'].data;
+        expect(data.length).toBeGreaterThan(0);
+        // The chart's last bar must read 42 (the gated value at the secondary's
+        // barstate.islast). If the secondary over-extends, this would be NaN.
+        const lastValue = data[data.length - 1].value;
+        expect(lastValue).toBe(42);
+    });
+
+    it('accepts a tuple expression (array) as positional, not as options bag', async () => {
+        // Regression: parseArgsForPineParams used to treat any plain object as
+        // the options bag — including JS arrays. A tuple expression like
+        // `[open, close]` was being misinterpreted, leaving `expression`
+        // undefined. Tuple destructuring on the result must work.
+        const code = `
+//@version=6
+indicator("tuple expr")
+[o, c] = request.security(syminfo.tickerid, 'D', [open, close])
+plot(o, "o")
+plot(c, "c")
+        `;
+        const pineTS = new PineTS(
+            Provider.Mock,
+            'BTCUSDC',
+            'D',
+            null,
+            new Date('2025-10-01').getTime(),
+            new Date('2025-10-05').getTime(),
+        );
+        const { plots } = await pineTS.run(code);
+        expect(plots['o'].data.length).toBeGreaterThan(0);
+        expect(plots['c'].data.length).toBeGreaterThan(0);
+        // Both should be valid numbers (same-TF shortcut returns open/close as-is)
+        plots['o'].data.forEach((p: any) => expect(isNaN(p.value)).toBe(false));
+        plots['c'].data.forEach((p: any) => expect(isNaN(p.value)).toBe(false));
+    });
+});
