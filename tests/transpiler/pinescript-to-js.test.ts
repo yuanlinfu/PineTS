@@ -1920,6 +1920,137 @@ plot(close)
     });
 });
 
+describe('Pine Script Transpilation - Comma-separated typed declarations', () => {
+    // Pine v6 allows multiple typed variable declarations on a single line
+    // sharing the leading type qualifier:
+    //   float a = 0.0, b = 1.0, c = 2.0
+    // Each segment after the first comma is `name = expr` with the captured
+    // type re-applied. The parser previously only handled this for var/varip
+    // chains (`var int x = 1, var int y = 2`).
+
+    it('parses comma-separated float declarations sharing the type', () => {
+        // Regression: previously failed with "Unexpected token COMMA ',' at <line:col>"
+        const code = `
+//@version=6
+indicator("multi-float decl")
+my_func() =>
+    float sumW = 0.0, sumWX = 0.0, sumWY = 0.0
+    sumW + sumWX + sumWY
+plot(my_func())
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        // All three identifiers must end up as separate scoped bindings
+        expect(jsCode).toContain('fn1_sumW');
+        expect(jsCode).toContain('fn1_sumWX');
+        expect(jsCode).toContain('fn1_sumWY');
+        // None must end up swallowed as a sub-expression of the previous initializer
+        expect(jsCode).not.toMatch(/sumW\s*=\s*\([^)]*sumWX/);
+    });
+
+    it('parses comma-separated int declarations sharing the type', () => {
+        const code = `
+//@version=6
+indicator("multi-int decl")
+my_func() =>
+    int aa = 1, bb = 2, cc = 3
+    aa + bb + cc
+plot(my_func())
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('fn1_aa');
+        expect(jsCode).toContain('fn1_bb');
+        expect(jsCode).toContain('fn1_cc');
+    });
+
+    it('parses comma-separated bool declarations sharing the type', () => {
+        const code = `
+//@version=6
+indicator("multi-bool decl")
+my_func() =>
+    bool xx = true, yy = false
+    xx or yy
+plot(my_func() ? 1 : 0)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('fn1_xx');
+        expect(jsCode).toContain('fn1_yy');
+        // Both literal values must be present somewhere in the initializers
+        expect(jsCode).toContain('true');
+        expect(jsCode).toContain('false');
+    });
+
+    it('parses comma-separated string declarations sharing the type', () => {
+        const code = `
+//@version=6
+indicator("multi-string decl")
+my_func() =>
+    string ss = "hello", tt = "world"
+    ss + tt
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('fn1_ss');
+        expect(jsCode).toContain('fn1_tt');
+        expect(jsCode).toMatch(/['"]hello['"]/);
+        expect(jsCode).toMatch(/['"]world['"]/);
+    });
+
+    it('parses comma-separated qualified-type declarations (series float)', () => {
+        const code = `
+//@version=6
+indicator("multi series-float decl")
+series float ema1 = 0.0, ema2 = 0.0
+plot(ema1 + ema2)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        // Both bindings emitted at global scope (glb1_*)
+        expect(jsCode).toContain('glb1_ema1');
+        expect(jsCode).toContain('glb1_ema2');
+    });
+
+    it('parses comma-separated generic-type declarations (array<float>)', () => {
+        const code = `
+//@version=6
+indicator("multi generic-type decl")
+my_func() =>
+    array<float> pp = na, qq = na
+    array.size(pp) + array.size(qq)
+plot(my_func())
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('fn1_pp');
+        expect(jsCode).toContain('fn1_qq');
+    });
+
+    it('does not consume commas belonging to outer constructs', () => {
+        // Sanity check: a single typed decl followed by a function call
+        // (whose args are comma-separated) must not pull those args into the decl.
+        const code = `
+//@version=6
+indicator("guard")
+my_func() =>
+    float a = 1.0
+    math.max(a, 2.0, 3.0)
+plot(my_func())
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        // math.max called normally
+        expect(jsCode).toMatch(/math\.max\(/);
+        // The constants `2` and `3` from math.max args must not have been
+        // mis-treated as additional declarators (which would emit fn1_2 etc.)
+        expect(jsCode).not.toMatch(/fn1_2\b/);
+        expect(jsCode).not.toMatch(/fn1_3\b/);
+    });
+});
+
 describe('Pine Script Transpilation - User function names colliding with JS reserved keywords', () => {
     // Pine allows user-defined functions/methods named after JS reserved keywords
     // (e.g. `method delete(...)`). The codegen must rename these consistently at

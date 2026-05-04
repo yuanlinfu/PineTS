@@ -706,7 +706,31 @@ export class Parser {
         const id = new Identifier(name);
         id.varType = varType;
 
-        return new VariableDeclaration([new VariableDeclarator(id, init, varType)], VariableDeclarationKind.LET);
+        const declarators = [new VariableDeclarator(id, init, varType)];
+
+        // Handle comma-separated typed declarations sharing the same type:
+        //   float a = 0.0, b = 1.0, c = 2.0
+        //   int x = 1, y = 2
+        //   array<float> p = na, q = na
+        // Each subsequent segment is `name = expr` with the leading type reapplied.
+        // Guard with peek(1)===IDENTIFIER so commas belonging to outer constructs
+        // (tuple destructuring, function args, etc.) aren't accidentally consumed.
+        while (this.match(TokenType.COMMA) && this.peek(1).type === TokenType.IDENTIFIER) {
+            this.advance(); // consume ','
+            this.skipNewlines(true);
+            let nextName = this.expect(TokenType.IDENTIFIER).value;
+            if (this.functionNames.has(nextName)) {
+                nextName = nextName + '_var';
+            }
+            this.expect(TokenType.OPERATOR, '=');
+            this.skipNewlines(true);
+            const nextInit = this.parseExpression();
+            const nextId = new Identifier(nextName);
+            nextId.varType = varType;
+            declarators.push(new VariableDeclarator(nextId, nextInit, varType));
+        }
+
+        return new VariableDeclaration(declarators, VariableDeclarationKind.LET);
     }
 
     // Parse function declaration
