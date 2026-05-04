@@ -65,6 +65,26 @@ export class ScopeManager {
     private userFunctions: Set<string> = new Set();
     private userMethods: Set<string> = new Set();
 
+    /**
+     * Registry of user-defined UDT type names → their field map (fieldName → fieldType).
+     * Populated from `const X = Type({fieldA: ['type', default], ...})` declarations
+     * (which pine2js emits from Pine `type X` declarations).
+     *
+     * V2 data model: stores field-type metadata. V1 logic only consults
+     * `isUdtTypeName` for now; field metadata is ready for future use-site
+     * type-aware rewrites (nested UDT chains, mixed scalar/array fields, etc.).
+     */
+    private udtTypeNames: Map<string, Record<string, string>> = new Map();
+
+    /**
+     * Registry of user variables that hold UDT instances → the UDT type name.
+     * Populated from `let bar = X.new(...)` / `bar = X.copy(...)` where
+     * `X ∈ udtTypeNames`. Stores the type name (V2 shape) so future passes
+     * can do typed-field lookups via `getUdtTypeFields(typeName)` without
+     * a refactor. V1 logic only consults `isUdtInstance`.
+     */
+    private udtInstances: Map<string, string> = new Map();
+
     public get nextParamIdArg(): any {
         return {
             type: 'Identifier',
@@ -145,6 +165,36 @@ export class ScopeManager {
 
     isLocalSeriesVar(name: string): boolean {
         return this.localSeriesVars.has(name);
+    }
+
+    // ── UDT registry ────────────────────────────────────────────────────
+    // V2-shape data model populated up-front; V1 logic only uses the
+    // boolean checks (`isUdtTypeName`, `isUdtInstance`) at use sites.
+    // Field-type metadata and per-variable UDT-type lookups are ready
+    // for future use (nested-field type discrimination, etc.).
+
+    addUdtTypeName(typeName: string, fields: Record<string, string> = {}): void {
+        this.udtTypeNames.set(typeName, fields);
+    }
+
+    isUdtTypeName(name: string): boolean {
+        return this.udtTypeNames.has(name);
+    }
+
+    getUdtTypeFields(typeName: string): Record<string, string> | undefined {
+        return this.udtTypeNames.get(typeName);
+    }
+
+    markVariableAsUdtInstance(varName: string, typeName: string): void {
+        this.udtInstances.set(varName, typeName);
+    }
+
+    getVariableUdtType(varName: string): string | undefined {
+        return this.udtInstances.get(varName);
+    }
+
+    isUdtInstance(varName: string): boolean {
+        return this.udtInstances.has(varName);
     }
 
     addContextBoundVar(name: string, isRootParam: boolean = false): void {

@@ -471,6 +471,44 @@ export function transformMemberExpression(memberNode: any, originalParamName: st
         delete memberNode.object;
         delete memberNode.property;
         delete memberNode.computed;
+        return;
+    }
+
+    // Subscript on a UDT-field chain: `bar.low[N]` where `bar` is a user
+    // variable known to hold a UDT instance.
+    //
+    // Pine semantics: `bar.low[N]` reads bar's `.low` from N bars ago.
+    // Since `bar = BAR.new()` runs every bar, `$.let.glb1_bar` is a Series
+    // of PineTypeObject instances → `$.get(glb1_bar, N).low` is correct.
+    //
+    // The rewrite is gated by `scopeManager.isUdtInstance(leafBaseName)` so it
+    // does NOT fire for JS-style array indexing (e.g. `pl.points[0]` where
+    // `pl` is initialized via `polyline.new(...)` — a built-in, not in the
+    // UDT registry).
+    if (memberNode.computed && memberNode.object && memberNode.object.type === 'MemberExpression') {
+        // Walk down to find the leaf base of the chain.
+        let cursor: any = memberNode.object;
+        while (cursor.object && cursor.object.type === 'MemberExpression') {
+            cursor = cursor.object;
+        }
+        if (
+            cursor.object && cursor.object.type === 'Identifier' &&
+            scopeManager.isUdtInstance(cursor.object.name)
+        ) {
+            const baseName = cursor.object.name;
+            // Replace leaf `bar` with `$.get(<scoped-bar>, lookback)` and drop
+            // the outer `[N]` — the chain (`.low`) now reads from the previous
+            // bar's UDT instance.
+            cursor.object = ASTFactory.createGetCall(
+                createScopedVariableReference(baseName, scopeManager),
+                memberNode.property,
+            );
+            // Re-anchor memberNode to the (now-rewritten) inner MemberExpression.
+            const inner = memberNode.object;
+            Object.assign(memberNode, inner);
+            delete memberNode.computed;
+            return;
+        }
     }
 }
 
@@ -903,6 +941,36 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
             transformCallExpression(arg.object, scopeManager);
         } else if (arg.object.type === 'MemberExpression') {
             transformMemberExpression(arg.object, '', scopeManager);
+            // Regression: `transformMemberExpression` early-returns for non-computed
+            // access on context-bound user variables (relying on a later top-level
+            // identifier walker to scope the base). But here the result is about to
+            // be wrapped in `$.param(...)` immediately, so the later walker never
+            // runs and the base identifier ends up bare in the emitted code.
+            // Pattern that hits this:  `bar.low[1]` where `bar` is a UDT instance.
+            // Walk into the MemberExpression chain and scope the leaf base when it
+            // is a user-declared variable (not a built-in / namespace / loop var /
+            // function param / local series).
+            let baseHolder: any = arg.object;
+            while (baseHolder && baseHolder.type === 'MemberExpression' && baseHolder.object) {
+                if (baseHolder.object.type === 'Identifier') {
+                    const base = baseHolder.object;
+                    const [scopedName] = scopeManager.getVariable(base.name);
+                    const isUserVariable = scopedName !== base.name;
+                    if (
+                        isUserVariable &&
+                        !scopeManager.isContextBound(base.name) &&
+                        !scopeManager.isRootParam(base.name) &&
+                        !scopeManager.isLoopVariable(base.name) &&
+                        !scopeManager.isLocalSeriesVar(base.name) &&
+                        !NAMESPACES_LIKE.includes(base.name) &&
+                        !KNOWN_NAMESPACES.includes(base.name)
+                    ) {
+                        baseHolder.object = createScopedVariableAccess(base.name, scopeManager);
+                    }
+                    break;
+                }
+                baseHolder = baseHolder.object;
+            }
         } else if (arg.object.type === 'BinaryExpression') {
             arg.object = getParamFromBinaryExpression(arg.object, scopeManager, namespace);
         } else if (arg.object.type === 'LogicalExpression') {

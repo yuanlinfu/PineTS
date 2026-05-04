@@ -55,6 +55,73 @@ export function transformNestedArrowFunctions(ast: any): void {
     });
 }
 
+/**
+ * Pre-walk the AST to populate the UDT registry on the ScopeManager.
+ *
+ * Two registries are populated:
+ *   1. UDT type names — collected from `const X = Type({field: ['type', default], ...})`
+ *      which pine2js emits from Pine `type X` declarations. The field-type metadata
+ *      is stored alongside (V2 data model) for future use-site type-aware rewrites.
+ *
+ *   2. UDT instance variables — variables initialized via `<X>.new(...)` or
+ *      `<X>.copy(...)` where X ∈ udtTypeNames. Each instance is tagged with its
+ *      UDT type name (V2 shape).
+ *
+ * The instance check intentionally consults `isUdtTypeName(X)` rather than just
+ * "X is an Identifier", so built-in factory calls like `array.from(...)`,
+ * `polyline.new(...)`, `chart.point.from_index(...)` are excluded — those are
+ * handled by their own runtime layers and must NOT be treated as UDT instances.
+ */
+export function preProcessUdtRegistry(ast: any, scopeManager: ScopeManager): void {
+    // Pass 1: collect UDT type names (and their field metadata) from `Type({...})` calls.
+    walk.simple(ast, {
+        VariableDeclaration(node: any) {
+            for (const decl of node.declarations) {
+                if (decl.id?.type !== 'Identifier' || !decl.init) continue;
+                if (
+                    decl.init.type === 'CallExpression' &&
+                    decl.init.callee?.type === 'Identifier' &&
+                    decl.init.callee.name === 'Type' &&
+                    decl.init.arguments?.length === 1 &&
+                    decl.init.arguments[0]?.type === 'ObjectExpression'
+                ) {
+                    const fields: Record<string, string> = {};
+                    for (const prop of decl.init.arguments[0].properties) {
+                        if (prop.type !== 'Property' || prop.key?.type !== 'Identifier') continue;
+                        // Each value is `['type', default]` (ArrayExpression) or `'type'` (Literal).
+                        if (prop.value?.type === 'ArrayExpression' && prop.value.elements?.[0]?.type === 'Literal') {
+                            fields[prop.key.name] = String(prop.value.elements[0].value);
+                        } else if (prop.value?.type === 'Literal') {
+                            fields[prop.key.name] = String(prop.value.value);
+                        }
+                    }
+                    scopeManager.addUdtTypeName(decl.id.name, fields);
+                }
+            }
+        },
+    });
+
+    // Pass 2: collect variables initialized via `<UDT>.new(...)` or `<UDT>.copy(...)`.
+    walk.simple(ast, {
+        VariableDeclaration(node: any) {
+            for (const decl of node.declarations) {
+                if (decl.id?.type !== 'Identifier' || !decl.init) continue;
+                if (
+                    decl.init.type === 'CallExpression' &&
+                    decl.init.callee?.type === 'MemberExpression' &&
+                    !decl.init.callee.computed &&
+                    decl.init.callee.object?.type === 'Identifier' &&
+                    decl.init.callee.property?.type === 'Identifier' &&
+                    (decl.init.callee.property.name === 'new' || decl.init.callee.property.name === 'copy') &&
+                    scopeManager.isUdtTypeName(decl.init.callee.object.name)
+                ) {
+                    scopeManager.markVariableAsUdtInstance(decl.id.name, decl.init.callee.object.name);
+                }
+            }
+        },
+    });
+}
+
 export function preProcessContextBoundVars(ast: any, scopeManager: ScopeManager): void {
     walk.simple(ast, {
         VariableDeclaration(node: any) {
