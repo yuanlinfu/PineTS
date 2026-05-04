@@ -77,6 +77,29 @@ export class Parser {
         return this.advance();
     }
 
+    // Pine v5/v6 contextual keywords — reserved only in their declaration-introducing
+    // position (e.g. `type Foo`, `method bar(...)`, `enum E`), but valid as identifiers
+    // anywhere else (e.g. as a UDT field name, function parameter, variable).
+    private static readonly CONTEXTUAL_KEYWORDS = new Set([
+        'type', 'method', 'enum',
+    ]);
+
+    /**
+     * Consume an identifier OR a contextual keyword used as an identifier.
+     * Used in positions where Pine permits soft keywords as names — most notably
+     * UDT field names like `int type = 0`.
+     */
+    expectIdentifierOrContextual(): Token {
+        const token = this.peek();
+        if (token.type === TokenType.IDENTIFIER) {
+            return this.advance();
+        }
+        if (token.type === TokenType.KEYWORD && Parser.CONTEXTUAL_KEYWORDS.has(token.value)) {
+            return this.advance();
+        }
+        throw new Error(`Expected ${TokenType.IDENTIFIER} but got ${token.type} at ${token.line}:${token.column}`);
+    }
+
     // Match a token, optionally ignoring NEWLINE and INDENT (for line continuation)
     matchEx(type, value = null, allowLineContinuation = false) {
         if (!allowLineContinuation) {
@@ -451,7 +474,9 @@ export class Parser {
 
             // Parse field: type name [= defaultValue]
             const fieldType = this.parseTypeExpression(); // Now handles generics
-            const fieldName = this.expect(TokenType.IDENTIFIER).value;
+            // Field names may be contextual keywords (e.g. `int type = 0`) — Pine
+            // treats `type`/`method`/`enum` as identifiers outside their declaration context.
+            const fieldName = this.expectIdentifierOrContextual().value;
 
             let defaultValue = null;
             if (this.match(TokenType.OPERATOR, '=')) {

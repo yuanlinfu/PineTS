@@ -1920,6 +1920,82 @@ plot(close)
     });
 });
 
+describe('Pine Script Transpilation - Contextual keywords as UDT field names', () => {
+    // Pine v5/v6 treats `type`, `method`, `enum` as contextual keywords:
+    // they're reserved only when they introduce a declaration. Elsewhere they're
+    // valid identifiers — most notably as UDT field names like `int type = 0`.
+
+    it('parses `type` as a UDT field name', () => {
+        // Regression: "Expected IDENTIFIER but got KEYWORD at <line:col>"
+        const code = `
+//@version=6
+indicator("UDT field named type", overlay=true)
+type MS
+    int type = 0
+
+m = MS.new(5)
+plot(m.type)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        // The field should be present in the type definition / object initialization
+        expect(jsCode).toMatch(/type\s*[:=]/);
+    });
+
+    it('parses `method` as a UDT field name', () => {
+        const code = `
+//@version=6
+indicator("UDT field named method", overlay=true)
+type Action
+    string method = "click"
+
+a = Action.new("hover")
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toMatch(/method\s*[:=]/);
+    });
+
+    it('parses `enum` as a UDT field name', () => {
+        const code = `
+//@version=6
+indicator("UDT field named enum", overlay=true)
+type Item
+    int enum = 1
+
+i = Item.new(2)
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toMatch(/enum\s*[:=]/);
+    });
+
+    it('still rejects `type` at the START of a top-level declaration line', () => {
+        // Sanity check: the contextual-keyword relaxation must NOT break the
+        // primary syntactic role of `type` as a UDT-introducer keyword.
+        const code = `
+//@version=6
+indicator("type still works as keyword")
+type Foo
+    int x = 1
+
+f = Foo.new(5)
+plot(f.x)
+        `;
+        // Should parse cleanly, with the `type` keyword properly consumed
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        // The Foo type should still produce a constructor / type wiring
+        expect(jsCode).toContain('Foo');
+    });
+});
+
 describe('Pine Script Transpilation - Comma-separated typed declarations', () => {
     // Pine v6 allows multiple typed variable declarations on a single line
     // sharing the leading type qualifier:
