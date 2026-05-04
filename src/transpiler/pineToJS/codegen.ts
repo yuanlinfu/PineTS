@@ -4,7 +4,7 @@
 // JavaScript Code Generator for PineScript AST
 // Transforms ESTree-compatible AST into JavaScript code
 
-import { CONTEXT_PINE_VARS, NAMESPACE_COLLISION_NAMES } from '../settings';
+import { CONTEXT_PINE_VARS, NAMESPACE_COLLISION_NAMES, JS_RESERVED_WORDS } from '../settings';
 
 // Set of names that conflict with Pine context variables/namespaces.
 // Function parameters with these names must be renamed to avoid Phase 2
@@ -61,22 +61,33 @@ export class CodeGenerator {
     }
 
     /**
-     * Scan the program body for variable declarations and assignments whose
-     * names collide with Pine namespace/built-in names (e.g., `fill`, `size`,
-     * `color`, `line`). Rename them with a `_$N` suffix so they don't shadow
-     * the namespace destructured from `$.pine`.
+     * Scan the program body for declarations whose names would collide with
+     * either Pine namespaces or JavaScript reserved keywords. Rename them
+     * with a `_$N` suffix.
      *
-     * Only renames **user variables** — function parameters are handled
-     * separately in generateFunctionDeclaration().
+     * Two collision classes, one rename pass:
      *
-     * Renaming rules:
-     * - Variable declaration target (let fill = ...) → renamed
-     * - Assignment target (fill := ...) → renamed
-     * - Bare identifier read (return fill) → renamed
-     * - Call callee (fill(...)) → NOT renamed (namespace call)
-     * - MemberExpression object (size.tiny) → NOT renamed (namespace access)
-     * - MemberExpression property (array.size) → NOT renamed (method name)
-     * - Object property key ({size: ...}) → NOT renamed (named arg key)
+     *  1. Pine namespace collisions (NAMESPACE_COLLISION_NAMES — e.g. `fill`,
+     *     `size`, `color`, `line`): user variable would shadow the namespace
+     *     destructured from `$.pine`. The CALL SITE `fill(...)` is the
+     *     namespace, NOT the renamed variable, so callees are NOT renamed.
+     *
+     *  2. JS reserved keyword collisions (JS_RESERVED_WORDS — e.g. `delete`,
+     *     `super`, `static`): the generated JS would fail to parse
+     *     (`function delete()` → "Unexpected keyword 'delete'"). The CALL SITE
+     *     `delete(arg)` IS the user function, so callees MUST be renamed.
+     *
+     * The walker checks the original name's source list at each call site to
+     * pick the right behavior.
+     *
+     * Renaming rules (common):
+     * - Variable declaration target (let fill = ...)  → renamed
+     * - Function declaration name (function delete()) → renamed (class 2 only)
+     * - Assignment target (fill := ...)               → renamed
+     * - Bare identifier read (return fill)            → renamed
+     * - MemberExpression object (size.tiny)           → NOT renamed
+     * - MemberExpression property (obj.delete)        → NOT renamed
+     * - Object property key ({size: ...})             → NOT renamed
      */
     private renameConflictingVariables(ast: any) {
         const renameMap = new Map<string, string>();
@@ -91,20 +102,30 @@ export class CodeGenerator {
     }
 
     /**
-     * Walk the AST and collect variable declarations / assignment targets
-     * whose names conflict with CONFLICTING_NAMES.
+     * True if `name` requires renaming — either a Pine namespace collision
+     * or a JS reserved keyword (which would make the generated JS invalid).
+     */
+    private isReservedName(name: string | undefined): boolean {
+        return !!name && (NAMESPACE_COLLISION_NAMES.has(name) || JS_RESERVED_WORDS.has(name));
+    }
+
+    /**
+     * Walk the AST and collect declarations whose names conflict with either
+     * Pine namespaces (NAMESPACE_COLLISION_NAMES) or JS reserved keywords
+     * (JS_RESERVED_WORDS). Both collision classes are renamed with the same
+     * `_$N` suffix scheme.
      */
     private collectConflictingVarNames(node: any, renameMap: Map<string, string>) {
         if (!node || typeof node !== 'object') return;
 
         if (node.type === 'VariableDeclaration') {
             for (const decl of node.declarations) {
-                if (decl.id?.type === 'Identifier' && NAMESPACE_COLLISION_NAMES.has(decl.id.name) && !renameMap.has(decl.id.name)) {
+                if (decl.id?.type === 'Identifier' && this.isReservedName(decl.id.name) && !renameMap.has(decl.id.name)) {
                     renameMap.set(decl.id.name, `${decl.id.name}_$${this.paramRenameCounter++}`);
                 }
                 if (decl.id?.type === 'ArrayPattern') {
                     for (const el of decl.id.elements) {
-                        if (el?.type === 'Identifier' && NAMESPACE_COLLISION_NAMES.has(el.name) && !renameMap.has(el.name)) {
+                        if (el?.type === 'Identifier' && this.isReservedName(el.name) && !renameMap.has(el.name)) {
                             renameMap.set(el.name, `${el.name}_$${this.paramRenameCounter++}`);
                         }
                     }
@@ -113,8 +134,16 @@ export class CodeGenerator {
         }
 
         if (node.type === 'AssignmentExpression' || node.type === 'ReassignmentExpression') {
-            if (node.left?.type === 'Identifier' && NAMESPACE_COLLISION_NAMES.has(node.left.name) && !renameMap.has(node.left.name)) {
+            if (node.left?.type === 'Identifier' && this.isReservedName(node.left.name) && !renameMap.has(node.left.name)) {
                 renameMap.set(node.left.name, `${node.left.name}_$${this.paramRenameCounter++}`);
+            }
+        }
+
+        // User-defined function/method names that collide with reserved identifiers.
+        // The function body inherits the rename via the same renameMap pass.
+        if (node.type === 'FunctionDeclaration') {
+            if (node.id?.type === 'Identifier' && this.isReservedName(node.id.name) && !renameMap.has(node.id.name)) {
+                renameMap.set(node.id.name, `${node.id.name}_$${this.paramRenameCounter++}`);
             }
         }
 
@@ -144,12 +173,19 @@ export class CodeGenerator {
     private renameVariableRefsInAST(node: any, renameMap: Map<string, string>) {
         if (!node || typeof node !== 'object') return;
 
-        // CallExpression: skip callee if it's a matching Identifier, rename args
+        // CallExpression: handle direct-Identifier callees specially.
         if (node.type === 'CallExpression') {
-            // For callee: if it's a MemberExpression (like array.size), handle normally via recursion
-            // If it's a direct Identifier (like fill()), skip it — it's a namespace call
             if (node.callee?.type === 'Identifier' && renameMap.has(node.callee.name)) {
-                // Skip callee, only process arguments
+                // Two cases:
+                //   - JS_RESERVED_WORDS rename (e.g. user `method delete` → `delete_$N`):
+                //     the callee IS the user function — must be renamed.
+                //   - NAMESPACE_COLLISION_NAMES rename (e.g. user `var fill = ...` while
+                //     also calling the built-in `fill(...)`): the callee here refers to
+                //     the namespace, not the renamed user variable — leave it alone.
+                if (JS_RESERVED_WORDS.has(node.callee.name)) {
+                    node.callee.name = renameMap.get(node.callee.name)!;
+                }
+                // else: skip callee
             } else {
                 this.renameVariableRefsInAST(node.callee, renameMap);
             }

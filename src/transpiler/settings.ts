@@ -65,6 +65,24 @@ export const NAMESPACE_COLLISION_NAMES = new Set([
     'alert', 'barstate', 'syminfo', 'timeframe', 'strategy', 'log', 'str',
 ]);
 
+// JavaScript reserved keywords that ARE valid Pine identifiers but invalid as
+// JS identifiers. When a user names a function/method/variable using one of
+// these, we must rename it during codegen — otherwise the generated JS fails
+// to parse (e.g. `function delete() {}` → `Unexpected keyword 'delete'`).
+//
+// Excludes words reserved in BOTH languages (break, case, class, const, continue,
+// do, else, enum, export, for, if, import, in, return, switch, try, var, while)
+// — those can't be Pine identifiers in the first place.
+//
+// Excludes `this` — special-cased elsewhere as the implicit first parameter
+// of Pine `method` declarations.
+export const JS_RESERVED_WORDS = new Set([
+    'await', 'debugger', 'default', 'delete', 'extends', 'finally',
+    'function', 'implements', 'instanceof', 'interface', 'let', 'new',
+    'package', 'private', 'protected', 'public', 'static', 'super',
+    'throw', 'typeof', 'void', 'with', 'yield',
+]);
+
 // All known data variables in the context
 export const CONTEXT_DATA_VARS = ['open', 'high', 'low', 'close', 'volume', 'hl2', 'hlc3', 'ohlc4', 'hlcc4', 'openTime', 'closeTime'];
 

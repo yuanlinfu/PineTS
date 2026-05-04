@@ -1920,6 +1920,61 @@ plot(close)
     });
 });
 
+describe('Pine Script Transpilation - User function names colliding with JS reserved keywords', () => {
+    // Pine allows user-defined functions/methods named after JS reserved keywords
+    // (e.g. `method delete(...)`). The codegen must rename these consistently at
+    // both the declaration site (`function delete()` is invalid JS) and at any
+    // direct call site, while leaving method-style invocations (`obj.delete()`)
+    // alone since JS allows reserved words as property names.
+
+    it('renames user method named `delete` so generated JS parses', () => {
+        // Regression: previously emitted `function delete()` → "Unexpected keyword 'delete'"
+        const code = `
+//@version=6
+indicator("delete method", overlay=true)
+type Foo
+    int x
+method delete(Foo this) =>
+    this.x := 0
+
+f = Foo.new(1)
+f.delete()
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        // Declaration must be renamed
+        expect(jsCode).not.toMatch(/function\s+delete\s*\(/);
+        expect(jsCode).toMatch(/function\s+delete_\$\d+\s*\(/);
+        // Method-style call site (property access) is still valid JS — keep as-is
+        // (PineTS lowers `obj.delete()` to `obj?.delete?.()` via optional chaining)
+        expect(jsCode).toMatch(/\.delete[?]?\.?\(/);
+    });
+
+    it('renames direct call to a user function named after a JS reserved word', () => {
+        // When a user function name is renamed, direct CallExpression callees
+        // referencing it must be renamed too. (Method-style `obj.delete()` is
+        // a property access and stays as `obj.delete()`.)
+        const code = `
+//@version=6
+indicator("direct call to user delete()")
+delete(int x) =>
+    x + 1
+y = delete(5)
+plot(y)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        // Declaration renamed
+        expect(jsCode).toMatch(/function\s+delete_\$\d+\s*\(/);
+        // Direct call site renamed too — same rename
+        expect(jsCode).toMatch(/delete_\$\d+\(/);
+        // Must NOT leave a bare `delete(` call (would fail JS parse if `delete` is the keyword)
+        expect(jsCode).not.toMatch(/[^_\w]delete\(\d/);
+    });
+});
+
 describe('Pine Script Transpilation - Real-World Example (MACD)', () => {
     it('should transpile complete MACD indicator', () => {
         const code = `
