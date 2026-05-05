@@ -110,7 +110,16 @@ export class TableHelper {
         return tbl;
     }
 
-    any(...args: any[]): TableObject {
+    // Pine `table(arg)` is a type cast / typed-na, NOT a constructor.
+    any(...args: any[]): TableObject | null {
+        if (args.length === 1) {
+            const arg = args[0];
+            if (arg === null || arg === undefined) return null;
+            if (typeof arg === 'object' && '__value' in arg) return null;  // NAHelper-like
+            if (typeof arg === 'number' && isNaN(arg)) return null;
+            if (arg instanceof TableObject) return arg;
+            return null;
+        }
         return this.new(...args);
     }
 

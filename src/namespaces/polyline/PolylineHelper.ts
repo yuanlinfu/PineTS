@@ -174,7 +174,21 @@ export class PolylineHelper {
     }
 
     // polyline() direct call — mapped via NAMESPACES_LIKE → polyline.any()
-    any(...args: any[]): PolylineObject {
+    // Pine `polyline(arg)` is a type cast / typed-na, NOT a constructor.
+    any(...args: any[]): PolylineObject | null {
+        if (args.length === 1) {
+            const arg = args[0];
+            if (arg === null || arg === undefined) return null;
+            if (arg instanceof NAHelper) return null;
+            if (typeof arg === 'number' && isNaN(arg)) return null;
+            if (arg instanceof PolylineObject) return arg;
+            if (arg instanceof Series) {
+                const v = arg.get(0);
+                if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return null;
+                if (v instanceof PolylineObject) return v;
+            }
+            return null;
+        }
         return this.new(...args);
     }
 

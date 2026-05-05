@@ -465,4 +465,34 @@ plot(close)
         // method `$M_delete` must NOT have been called.
         expect(lines.length).toBe(0);
     });
+
+    // ── Regression: method param name shadows outer-scope UDT instance ──
+    // When a `method foo(MyUDT thing)` declares a parameter that shares a
+    // name with an outer-scope UDT variable (e.g. `var MyUDT thing = ...`),
+    // the per-function UDT-instance registration used to wipe the outer
+    // entry on function exit (blanket `unmark` instead of save/restore).
+    // Subsequent `thing.foo()` call sites then fell out of UFCS retargeting
+    // because `isUdtInstance('thing')` returned false at the call site.
+    it('runtime: param name that shadows outer UDT variable does not break dispatch', async () => {
+        const pineTS = new PineTS(Provider.Binance, 'BTCUSDC', '1W', null,
+            new Date('2018-12-15').getTime(),
+            new Date('2019-04-01').getTime());
+        const code = `
+//@version=6
+indicator("UDT param name shadow", overlay=true)
+type ZZ
+    int v
+method touch(ZZ aZZ) =>
+    aZZ.v := aZZ.v + 1
+var ZZ aZZ = ZZ.new(0)
+if bar_index == 5
+    aZZ.touch()
+plot(aZZ.v, "v")
+`;
+        const r = await pineTS.run(code);
+        const v = r.plots?.['v']?.data;
+        // After bar_index == 5 the touch() method must have incremented v
+        // from 0 to 1. The last bar's plot value is what we check.
+        expect(v?.[v.length - 1]?.value).toBe(1);
+    });
 });

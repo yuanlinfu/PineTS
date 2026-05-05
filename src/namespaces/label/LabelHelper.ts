@@ -184,7 +184,21 @@ export class LabelHelper {
     }
 
     // label() direct call — mapped via NAMESPACES_LIKE → label.any()
-    any(...args: any[]): LabelObject {
+    // Pine `label(arg)` is a type cast / typed-na, NOT a constructor.
+    any(...args: any[]): LabelObject | null {
+        if (args.length === 1) {
+            const arg = args[0];
+            if (arg === null || arg === undefined) return null;
+            if (arg instanceof NAHelper) return null;
+            if (typeof arg === 'number' && isNaN(arg)) return null;
+            if (arg instanceof LabelObject) return arg;
+            if (arg instanceof Series) {
+                const v = arg.get(0);
+                if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return null;
+                if (v instanceof LabelObject) return v;
+            }
+            return null;
+        }
         return this.new(...args);
     }
 

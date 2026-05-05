@@ -1357,8 +1357,15 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
         const rawFnName = node.id?.name as string | undefined;
         const fnName = rawFnName?.startsWith('$M_') ? rawFnName.slice(3) : rawFnName;
         const paramTypes = fnName ? scopeManager.getFunctionParamUdtTypes(fnName) : undefined;
+        // Snapshot prior bindings for parameter names that shadow outer-scope
+        // UDT instances (e.g. `method touch(ZZ aZZ)` where `aZZ` is also a
+        // global UDT variable). Without this, the unmark on function exit
+        // would wipe the outer registration too, breaking later `aZZ.foo()`
+        // dispatches at the call site.
+        const savedUdtBindings: Record<string, string | undefined> = {};
         if (paramTypes) {
             for (const [paramName, typeName] of Object.entries(paramTypes)) {
+                savedUdtBindings[paramName] = scopeManager.getVariableUdtType(paramName);
                 scopeManager.markVariableAsUdtInstance(paramName, typeName);
             }
         }
@@ -1375,6 +1382,10 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
         if (paramTypes) {
             for (const paramName of Object.keys(paramTypes)) {
                 scopeManager.unmarkVariableAsUdtInstance(paramName);
+                const prev = savedUdtBindings[paramName];
+                if (prev !== undefined) {
+                    scopeManager.markVariableAsUdtInstance(paramName, prev);
+                }
             }
         }
 

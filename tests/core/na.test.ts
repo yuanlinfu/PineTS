@@ -117,4 +117,34 @@ plot(na(obj.l) ? 1 : 0, "l_is_na")
         expect(plots['l'].data[0].value).toBe(200);
         expect(plots['l_is_na'].data[0].value).toBe(0);
     });
+
+    // ── Regression: built-in type-name calls are typed-na, not constructors ──
+    // Pine `box(na)`, `line(na)`, `label(na)` etc. are TYPE CASTS that produce
+    // a typed-na value — they do NOT call the constructor.
+    // PineTS used to alias `box.any(...)` directly to `box.new(...)`, so
+    // `box(na)` would create an empty BoxObject with NaN coordinates instead
+    // of a na value. This polluted the helper with placeholder objects that
+    // showed up on the chart at NaN positions.
+    it('box(na), line(na), label(na) are typed-na, not constructor calls', async () => {
+        const code = `
+//@version=5
+indicator("typed-na test", overlay=true)
+box bx = box(na)
+line ln = line(na)
+label lb = label(na)
+plot(na(bx) ? 1 : 0, "bx_na")
+plot(na(ln) ? 1 : 0, "ln_na")
+plot(na(lb) ? 1 : 0, "lb_na")
+`;
+        const r = await pineTS.run(code);
+        // All three should be na — no actual drawings should be created.
+        expect(r.plots['bx_na'].data[0].value).toBe(1);
+        expect(r.plots['ln_na'].data[0].value).toBe(1);
+        expect(r.plots['lb_na'].data[0].value).toBe(1);
+        // Also verify the helpers contain no objects
+        const [labelH, lineH, boxH] = r._drawingHelpers || [];
+        expect(boxH._boxes.length).toBe(0);
+        expect(lineH._lines.length).toBe(0);
+        expect(labelH._labels.length).toBe(0);
+    });
 });

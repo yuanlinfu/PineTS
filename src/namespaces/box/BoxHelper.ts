@@ -202,7 +202,25 @@ export class BoxHelper {
         );
     }
 
-    any(...args: any[]): BoxObject {
+    any(...args: any[]): BoxObject | null {
+        // Pine `box(arg)` is a type cast / typed-na, NOT a constructor:
+        //   box bx = box(na)         → typed-na (na(bx) is true)
+        //   box bx = box(some_box)   → no-op cast (bx === some_box)
+        // The constructor is `box.new(...)`. Multi-arg calls fall through to
+        // .new() to preserve any incidental usage.
+        if (args.length === 1) {
+            const arg = args[0];
+            if (arg === null || arg === undefined) return null;
+            if (arg instanceof NAHelper) return null;
+            if (typeof arg === 'number' && isNaN(arg)) return null;
+            if (arg instanceof BoxObject) return arg;
+            if (arg instanceof Series) {
+                const v = arg.get(0);
+                if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return null;
+                if (v instanceof BoxObject) return v;
+            }
+            return null;
+        }
         return this.new(...args);
     }
 

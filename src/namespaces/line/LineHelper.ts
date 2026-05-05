@@ -183,7 +183,21 @@ export class LineHelper {
     }
 
     // line() direct call — mapped via NAMESPACES_LIKE → line.any()
-    any(...args: any[]): LineObject {
+    // Pine `line(arg)` is a type cast / typed-na, NOT a constructor.
+    any(...args: any[]): LineObject | null {
+        if (args.length === 1) {
+            const arg = args[0];
+            if (arg === null || arg === undefined) return null;
+            if (arg instanceof NAHelper) return null;
+            if (typeof arg === 'number' && isNaN(arg)) return null;
+            if (arg instanceof LineObject) return arg;
+            if (arg instanceof Series) {
+                const v = arg.get(0);
+                if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return null;
+                if (v instanceof LineObject) return v;
+            }
+            return null;
+        }
         return this.new(...args);
     }
 
