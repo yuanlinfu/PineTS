@@ -279,8 +279,12 @@ describe('LABEL Namespace', () => {
     it('label data is pushed to __labels__ plot with correct structure', async () => {
         const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', null, new Date('2025-01-01').getTime(), new Date('2025-11-20').getTime());
 
+        // Use `var` so the label is created exactly once on bar 0; without it,
+        // a fresh label would be created every bar and `_enforceMaxCount`
+        // would silently retire older ones — making the assertions below
+        // dependent on bar count.
         const { plots } = await pineTS.run((context) => {
-            label.new(bar_index, 50000, 'PlotTest', xloc.bar_index, yloc.price, '#ff0000', label.style_label_down, '#ffffff');
+            var myLabel = label.new(bar_index, 50000, 'PlotTest', xloc.bar_index, yloc.price, '#ff0000', label.style_label_down, '#ffffff');
             return {};
         });
 
@@ -291,7 +295,6 @@ describe('LABEL Namespace', () => {
         // Labels are now stored as an aggregated array (like lines)
         const labels = labelEntry.value;
         expect(Array.isArray(labels)).toBe(true);
-        // Find our label (the first non-deleted one created on the first bar)
         const lbl = labels.find((l: any) => l.text === 'PlotTest');
         expect(lbl).toBeDefined();
         expect(lbl.x).toBe(0);

@@ -141,8 +141,17 @@ export class CodeGenerator {
 
         // User-defined function/method names that collide with reserved identifiers.
         // The function body inherits the rename via the same renameMap pass.
+        //
+        // Skip methods (`method foo(...) =>`): their JS identifier already gets
+        // a `$M_` prefix in `generateFunctionDeclaration` which is collision-
+        // proof by construction. Adding `_$N` on top would change the Pine
+        // name visible at the call site (`obj.delete()` looks up `delete`,
+        // not `delete_$0`), breaking UFCS retargeting in ExpressionTransformer.
         if (node.type === 'FunctionDeclaration') {
-            if (node.id?.type === 'Identifier' && this.isReservedName(node.id.name) && !renameMap.has(node.id.name)) {
+            if (node.id?.type === 'Identifier' &&
+                !node.id.isMethod &&
+                this.isReservedName(node.id.name) &&
+                !renameMap.has(node.id.name)) {
                 renameMap.set(node.id.name, `${node.id.name}_$${this.paramRenameCounter++}`);
             }
         }
@@ -688,6 +697,24 @@ export class CodeGenerator {
             }
 
             this.write(';\n');
+
+            // Preserve the explicit Pine type annotation so the AnalysisPass
+            // can register the variable as a UDT instance even when the
+            // initializer's type cannot be inferred from the expression alone
+            // (e.g. `Holder r = arr.get(0)` or `Holder r = map.get(key)`).
+            // Emit a bare string-literal expression statement — acorn keeps it
+            // as `ExpressionStatement(Literal)` and it is a no-op at runtime.
+            const declaredType = decl.id?.varType;
+            const declaredName = decl.id?.type === 'Identifier' ? decl.id.name : null;
+            if (
+                declaredName &&
+                typeof declaredType === 'string' &&
+                /^[A-Za-z_$][\w$]*$/.test(declaredType) &&
+                declaredType[0] === declaredType[0].toUpperCase()
+            ) {
+                this.write(this.indentStr.repeat(this.indent));
+                this.write(`"__pineUdtVar:${declaredName}=${declaredType}";\n`);
+            }
         }
     }
 

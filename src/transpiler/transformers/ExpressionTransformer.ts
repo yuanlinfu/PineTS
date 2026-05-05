@@ -1533,7 +1533,17 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         // method call on the object, never a call to a user-defined function.
         const isUserMethod = scopeManager.isUserMethod(methodName);
 
-        if (isUserFunction && isUserMethod && !scopeManager.isContextBound(methodName) && !isBuiltinMethodOnParam && !isChainedPropertyMethod) {
+        // Receiver-type guard: only retarget `obj.method()` when `obj` is a known
+        // UDT instance. Without this guard, names that collide with user methods
+        // would also retarget for built-in receivers — e.g. a `method delete(...)`
+        // declared on a UDT would hijack `someLine.delete()` calls. Narrowing on
+        // `isUdtInstance` keeps built-in calls intact.
+        // The receiver may have already been wrapped into a `$.get(...)` call by
+        // an earlier pass — but the original Identifier name is preserved on
+        // the wrapper as `.name`, so a single lookup covers both shapes.
+        const isReceiverUdtInstance = !!_obj.name && scopeManager.isUdtInstance(_obj.name);
+
+        if (isUserFunction && isUserMethod && !scopeManager.isContextBound(methodName) && !isBuiltinMethodOnParam && !isChainedPropertyMethod && isReceiverUdtInstance) {
             // It's a user variable/function.
             // Transform obj.method(args) -> method(obj, args)
             // 1. Get the object (first arg)

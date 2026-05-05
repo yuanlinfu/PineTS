@@ -42,7 +42,7 @@ export class LineHelper {
     public syncToPlot() {
         this._ensurePlotsEntry();
         const time = this.context.marketData[0]?.openTime || 0;
-        const allPlotData = this._lines.map(ln => ln.toPlotData());
+        const allPlotData = this._lines.filter(ln => !ln._deleted).map(ln => ln.toPlotData());
 
         // Split force_overlay objects into a separate overlay plot (renders on main chart pane)
         const regular = allPlotData.filter((l: any) => !l.force_overlay);

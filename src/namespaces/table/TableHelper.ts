@@ -27,7 +27,7 @@ export class TableHelper {
         const time = this.context.marketData[0]?.openTime || 0;
         this.context.plots['__tables__'].data = [{
             time,
-            value: this._tables.map(tbl => tbl.toPlotData()),
+            value: this._tables.filter(tbl => !tbl._deleted).map(tbl => tbl.toPlotData()),
             options: { style: 'table' },
         }];
     }

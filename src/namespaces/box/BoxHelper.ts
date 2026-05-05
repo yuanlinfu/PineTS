@@ -45,7 +45,7 @@ export class BoxHelper {
     public syncToPlot() {
         this._ensurePlotsEntry();
         const time = this.context.marketData[0]?.openTime || 0;
-        const allPlotData = this._boxes.map(bx => bx.toPlotData());
+        const allPlotData = this._boxes.filter(bx => !bx._deleted).map(bx => bx.toPlotData());
 
         // Split force_overlay objects into a separate overlay plot (renders on main chart pane)
         const regular = allPlotData.filter((b: any) => !b.force_overlay);

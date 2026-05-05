@@ -44,7 +44,7 @@ export class LabelHelper {
     public syncToPlot() {
         this._ensurePlotsEntry();
         const time = this.context.marketData[0]?.openTime || 0;
-        const allPlotData = this._labels.map(lbl => lbl.toPlotData());
+        const allPlotData = this._labels.filter(lbl => !lbl._deleted).map(lbl => lbl.toPlotData());
 
         // Split force_overlay objects into a separate overlay plot (renders on main chart pane)
         const regular = allPlotData.filter((l: any) => !l.force_overlay);

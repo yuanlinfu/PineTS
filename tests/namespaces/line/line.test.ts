@@ -399,4 +399,31 @@ describe('LINE Namespace', () => {
         // At least 3 lines should exist (var creates on bar 0 only, let creates on every bar)
         expect(lines.length).toBeGreaterThanOrEqual(3);
     });
+
+    it('deleted lines are excluded from the __lines__ plot output', async () => {
+        // Regression: indicators that delete-and-recreate a line every bar
+        // (e.g. LuxAlgo Range Intelligence Suite refreshing the active POC line)
+        // were leaving every prior version in the rendered output. This test
+        // creates 5 lines while explicitly deleting all but the last, and
+        // asserts the published plot value contains only the surviving line.
+        const code = `
+//@version=5
+indicator("delete-then-render", overlay=true)
+var line ln = na
+if bar_index < 5
+    if not na(ln)
+        ln.delete()
+    ln := line.new(bar_index, 100, bar_index + 5, 200)
+plot(close)
+`;
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', null, new Date('2025-01-01').getTime(), new Date('2025-01-15').getTime());
+        const { plots } = await pineTS.run(code);
+
+        const lines = plots['__lines__'].data[0].value;
+        expect(Array.isArray(lines)).toBe(true);
+        // 5 lines created, 4 explicitly deleted — only 1 must remain
+        expect(lines.length).toBe(1);
+        // The surviving one is the last one (bar_index = 4)
+        expect(lines[0].x1).toBe(4);
+    });
 });

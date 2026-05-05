@@ -201,6 +201,28 @@ export function preProcessUdtRegistry(ast: any, scopeManager: ScopeManager): voi
                 }
             }
         },
+        // Pass 2b: pick up explicit Pine type annotations preserved by codegen
+        // as bare string-literal markers (`"__pineUdtVar:<varName>=<TypeName>"`).
+        // This covers cases the expression-based inference can't reach — e.g.
+        // `Holder r = arr.get(0)`, `Holder r = map.get(key)`, etc. — where the
+        // Pine type is stated explicitly but the initializer is not directly
+        // recognisable as UDT-producing.
+        ExpressionStatement(node: any) {
+            const expr = node.expression;
+            if (
+                expr?.type === 'Literal' &&
+                typeof expr.value === 'string' &&
+                expr.value.startsWith('__pineUdtVar:')
+            ) {
+                const m = expr.value.match(/^__pineUdtVar:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)$/);
+                if (m) {
+                    const [, varName, typeName] = m;
+                    if (scopeManager.isUdtTypeName(typeName)) {
+                        scopeManager.markVariableAsUdtInstance(varName, typeName);
+                    }
+                }
+            }
+        },
     });
 
     // Pass 3: collect UDT-typed function parameters from the

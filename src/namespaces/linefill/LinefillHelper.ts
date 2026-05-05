@@ -27,7 +27,7 @@ export class LinefillHelper {
     public syncToPlot() {
         this._ensurePlotsEntry();
         const time = this.context.marketData[0]?.openTime || 0;
-        const allPlotData = this._linefills.map(lf => lf.toPlotData());
+        const allPlotData = this._linefills.filter(lf => !lf._deleted).map(lf => lf.toPlotData());
 
         // Split force_overlay linefills into a separate overlay plot
         const regular = allPlotData.filter((lf: any) => !lf.force_overlay);

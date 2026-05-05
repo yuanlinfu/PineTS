@@ -2151,14 +2151,16 @@ plot(close)
         const result = transpile(code);
         const jsCode = result.toString();
         expect(jsCode).toBeDefined();
-        // Declaration must be renamed — accepts both the JS-reserved-keyword
-        // rename suffix (`_$N`) and the method-disambiguation prefix (`$M_`).
-        // The bare `function delete(` form must NEVER appear (would break parse).
+        // Declaration must NOT be the bare reserved word (would break JS parse).
         expect(jsCode).not.toMatch(/function\s+delete\s*\(/);
-        expect(jsCode).toMatch(/function\s+\$M_delete_\$\d+\s*\(/);
-        // Method-style call site (property access) is still valid JS — keep as-is
-        // (PineTS lowers `obj.delete()` to `obj?.delete?.()` via optional chaining)
-        expect(jsCode).toMatch(/\.delete[?]?\.?\(/);
+        // Method declarations get a `$M_` JS prefix that is collision-proof
+        // by construction — no `_$N` reserved-name suffix is needed (and adding
+        // one would break Pine-name lookup at the call site, since the AnalysisPass
+        // strips only `$M_` to recover the Pine name `delete`).
+        expect(jsCode).toMatch(/function\s+\$M_delete\s*\(/);
+        // The Pine call site `f.delete()` retargets to `$.call($M_delete, ...)`
+        // when the receiver is a known UDT instance.
+        expect(jsCode).toMatch(/\$\.call\s*\(\s*\$M_delete\b/);
     });
 
     it('renames direct call to a user function named after a JS reserved word', () => {

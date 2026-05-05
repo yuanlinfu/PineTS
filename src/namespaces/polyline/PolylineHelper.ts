@@ -32,7 +32,7 @@ export class PolylineHelper {
         const time = this.context.marketData[0]?.openTime || 0;
         this.context.plots['__polylines__'].data = [{
             time,
-            value: this._polylines.map(pl => pl.toPlotData()),
+            value: this._polylines.filter(pl => !pl._deleted).map(pl => pl.toPlotData()),
             options: { style: 'drawing_polyline' },
         }];
     }

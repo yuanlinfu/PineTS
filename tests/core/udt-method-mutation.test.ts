@@ -338,4 +338,131 @@ plot(close)
         `;
         await expect(pineTS.run(code)).resolves.toBeDefined();
     });
+
+    // ── Regression: method named after a JS reserved word ─────────────
+    // `delete`, `class`, `return`, etc. collide with JS keywords. The
+    // codegen renames such identifiers with `_$N` to keep the generated
+    // JS valid — but for a Pine `method`, the JS name already gets a
+    // collision-proof `$M_` prefix, so adding `_$N` on top would change
+    // the Pine name visible at the call site (`obj.delete()` looks up
+    // `delete`, not `delete_$0`) and break the UFCS retargeting.
+    // Codegen must skip the reserved-name rename for methods.
+    it('codegen: method named `delete` keeps the bare $M_<name> identifier', () => {
+        const code = `
+//@version=6
+indicator("delete method", overlay=true)
+type Foo
+    int x
+method delete(Foo this) =>
+    this.x := 0
+
+f = Foo.new(1)
+f.delete()
+plot(close)
+        `;
+        const js = transpile(code).toString();
+        // Bare `delete(` must not appear (would be a JS parse error)
+        expect(js).not.toMatch(/function\s+delete\s*\(/);
+        // Method name must be the bare `$M_delete` form — no `_$N` suffix
+        expect(js).toMatch(/function\s+\$M_delete\s*\(/);
+        expect(js).not.toMatch(/function\s+\$M_delete_\$\d+\s*\(/);
+        // Call site `f.delete()` must retarget to `$.call($M_delete, ..., f)`.
+        expect(js).toMatch(/\$\.call\s*\(\s*\$M_delete\b/);
+    });
+
+    it('runtime: method named `delete` is dispatched via UFCS', async () => {
+        // Whole-pipeline check: define `method delete` on a UDT that wraps
+        // a built-in line, then call `obj.delete()` and verify the user
+        // method actually fired (cascading to the inner line.delete()).
+        // Before the fix, the user method registration was keyed by
+        // `delete_$0` while the call site looked up `delete`, so
+        // `obj.delete()` was a silent no-op and the inner line was never
+        // marked deleted.
+        const pineTS = new PineTS(Provider.Binance, 'BTCUSDC', '1W', null,
+            new Date('2018-12-15').getTime(),
+            new Date('2019-04-01').getTime());
+        const code = `
+//@version=6
+indicator("delete method runtime", overlay=true)
+type Holder
+    line ln
+method delete(Holder this) =>
+    this.ln.delete()
+
+if bar_index == 5
+    Holder h = Holder.new(line.new(0, 100, 5, 110))
+    h.delete()
+plot(close)
+`;
+        const r = await pineTS.run(code);
+        const lines = r.plots?.['__lines__']?.data?.[0]?.value || [];
+        // The single line created at bar 5 must have been deleted via
+        // h.delete() → user method → this.ln.delete().
+        expect(lines.length).toBe(0);
+    });
+
+    // ── Regression: explicit Pine type annotation must register UDT instance ──
+    // `Holder r = arr.get(0)` should register `r` as a Holder instance even
+    // though `inferUdtTypeFromInit` can't tell the type from `arr.get(0)`.
+    // Codegen preserves the type via a `"__pineUdtVar:r=Holder"` marker that
+    // the AnalysisPass picks up. Without this, `r.delete()` would fall back
+    // to the no-op direct property access on a PineTypeObject.
+    it('runtime: UDT retrieved from an array dispatches user methods correctly', async () => {
+        const pineTS = new PineTS(Provider.Binance, 'BTCUSDC', '1W', null,
+            new Date('2018-12-15').getTime(),
+            new Date('2019-04-01').getTime());
+        const code = `
+//@version=6
+indicator("udt from array", overlay=true)
+type Holder
+    line ln
+method clear(Holder this) =>
+    this.ln.delete()
+
+if bar_index == 5
+    Holder h = Holder.new(line.new(0, 100, 5, 110))
+    Holder[] arr = array.new<Holder>()
+    arr.push(h)
+    Holder r = arr.get(0)
+    r.clear()
+plot(close)
+`;
+        const r = await pineTS.run(code);
+        const lines = r.plots?.['__lines__']?.data?.[0]?.value || [];
+        // The line must have been deleted via r.clear() → $M_clear(r) →
+        // r.ln.delete(). r is a Holder via the explicit Pine annotation.
+        expect(lines.length).toBe(0);
+    });
+
+    // ── Regression: type-aware UFCS retargeting ─────────────────────────
+    // When a UDT method shares a name with a built-in (e.g. `delete`), the
+    // retargeting must only fire for UDT receivers. `someLine.delete()`
+    // must keep calling the built-in `LineHelper.delete`, not be hijacked
+    // into `$M_delete(someLine)` (which would try `someLine.ln.delete()`
+    // and fail silently because lines don't have an `ln` field).
+    it('runtime: UFCS retargeting is type-aware (built-in line.delete keeps working)', async () => {
+        const pineTS = new PineTS(Provider.Binance, 'BTCUSDC', '1W', null,
+            new Date('2018-12-15').getTime(),
+            new Date('2019-04-01').getTime());
+        const code = `
+//@version=6
+indicator("type-aware retarget", overlay=true)
+type Holder
+    line ln
+method delete(Holder this) =>
+    this.ln.delete()
+
+if bar_index == 5
+    // A bare line — NOT a UDT instance.
+    line bareLine = line.new(0, 200, 5, 210)
+    bareLine.delete()
+plot(close)
+`;
+        const r = await pineTS.run(code);
+        const lines = r.plots?.['__lines__']?.data?.[0]?.value || [];
+        // The bare line was deleted via the built-in line.delete() —
+        // because `bareLine` is a Line, not a UDT instance, the user
+        // method `$M_delete` must NOT have been called.
+        expect(lines.length).toBe(0);
+    });
 });
