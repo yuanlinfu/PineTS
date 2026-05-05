@@ -132,4 +132,54 @@ chart.point[] polyPoints = array.new<chart.point>()
         expect(jsCode).toBeDefined();
         expect(jsCode).toContain('polyPoints');
     });
+
+    // Two complete typed declarations on a single line, separated by a comma.
+    // The shared-type comma-decl path used to greedily swallow the comma when
+    // the next token was an IDENTIFIER, then fail at the dot inside the second
+    // type name. Mirrors the pattern used in Liquidity-Structure.pine where
+    // the script declares two `chart.point[]` arrays in one statement:
+    //   chart.point[] cpS_f = array.new<chart.point>(), chart.point[] cpB_f = array.new<chart.point>()
+    it('should parse two full chart.point[] declarations on one line (comma-separated)', () => {
+        const code = `
+//@version=6
+indicator("Test")
+chart.point[] cpS_f = array.new<chart.point>(), chart.point[] cpB_f = array.new<chart.point>()
+        `;
+
+        const result = pineToJS(code);
+        expect(result.success).toBe(true);
+        expect(result.code).toBeDefined();
+        expect(result.code).toContain('cpS_f');
+        expect(result.code).toContain('cpB_f');
+    });
+
+    // The shared-type form (one type, multiple names) must still work.
+    it('should still parse shared-type comma-decl: float a = 0.0, b = 1.0', () => {
+        const code = `
+//@version=5
+indicator("Test")
+float a = 0.0, b = 1.0
+        `;
+
+        const result = pineToJS(code);
+        expect(result.success).toBe(true);
+        expect(result.code).toBeDefined();
+        expect(result.code).toContain('a');
+        expect(result.code).toContain('b');
+    });
+
+    // The full-repeated-type form with a non-dotted type must also still work.
+    it('should parse full-repeated-type form: float a = 1.0, float b = 2.0', () => {
+        const code = `
+//@version=5
+indicator("Test")
+float a = 1.0, float b = 2.0
+        `;
+
+        const result = pineToJS(code);
+        expect(result.success).toBe(true);
+        expect(result.code).toBeDefined();
+        expect(result.code).toContain('a');
+        expect(result.code).toContain('b');
+    });
 });

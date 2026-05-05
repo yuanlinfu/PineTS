@@ -754,9 +754,17 @@ export class Parser {
         //   int x = 1, y = 2
         //   array<float> p = na, q = na
         // Each subsequent segment is `name = expr` with the leading type reapplied.
-        // Guard with peek(1)===IDENTIFIER so commas belonging to outer constructs
-        // (tuple destructuring, function args, etc.) aren't accidentally consumed.
-        while (this.match(TokenType.COMMA) && this.peek(1).type === TokenType.IDENTIFIER) {
+        // The guard requires `, IDENT =` so we don't greedily swallow commas
+        // that belong to a separate full declaration on the same line, e.g.
+        //   chart.point[] a = ..., chart.point[] b = ...
+        // (`peek(2)` would be DOT/LBRACKET/IDENT, not `=`). Those flow up to
+        // the multi-statement handler in parseStatement (Layer 2).
+        while (
+            this.match(TokenType.COMMA) &&
+            this.peek(1).type === TokenType.IDENTIFIER &&
+            this.peek(2).type === TokenType.OPERATOR &&
+            this.peek(2).value === '='
+        ) {
             this.advance(); // consume ','
             this.skipNewlines(true);
             let nextName = this.expect(TokenType.IDENTIFIER).value;
