@@ -41,6 +41,12 @@ export class Parser {
     private tokens: Token[];
     private pos: number;
     private functionNames: Set<string> = new Set();
+    // Stack of parameter-name sets for currently-being-parsed function bodies.
+    // When the body of fn `f(x, y) =>` is being parsed, the top frame is {x, y}.
+    // Used to suppress the `name → name_var` rewrite for identifiers that are
+    // really parameters of the enclosing function and just happen to share a
+    // name with some other user function.
+    private paramScopes: Set<string>[] = [];
     // When true, peekOperatorEx does NOT cross NEWLINE boundaries at all.
     // Used inside single-line switch case bodies to prevent binary operator
     // continuation from absorbing the next case's negative test value.
@@ -53,6 +59,16 @@ export class Parser {
     // Utility methods
     peek(offset = 0) {
         return this.tokens[this.pos + offset] || this.tokens[this.tokens.length - 1];
+    }
+
+    // True if `name` is a parameter of any function whose body we're currently
+    // parsing. Used to suppress the global `name → name_var` rewrite for
+    // parameters that just happen to share a name with a user function.
+    private isCurrentFunctionParam(name: string): boolean {
+        for (const frame of this.paramScopes) {
+            if (frame.has(name)) return true;
+        }
+        return false;
     }
 
     advance() {
@@ -832,7 +848,18 @@ export class Parser {
         this.expect(TokenType.OPERATOR, '=>');
         this.skipNewlines();
 
-        const body = this.parseFunctionBody();
+        const paramFrame = new Set<string>();
+        for (const p of params) {
+            const ident = p.type === 'AssignmentPattern' ? (p as any).left : p;
+            if (ident && ident.name) paramFrame.add(ident.name);
+        }
+        this.paramScopes.push(paramFrame);
+        let body: BlockStatement;
+        try {
+            body = this.parseFunctionBody();
+        } finally {
+            this.paramScopes.pop();
+        }
         const id = new Identifier(name);
         if (returnType) id.returnType = returnType;
 
@@ -913,7 +940,18 @@ export class Parser {
         this.expect(TokenType.OPERATOR, '=>');
         this.skipNewlines();
 
-        const body = this.parseFunctionBody();
+        const paramFrame = new Set<string>();
+        for (const p of params) {
+            const ident = p.type === 'AssignmentPattern' ? (p as any).left : p;
+            if (ident && ident.name) paramFrame.add(ident.name);
+        }
+        this.paramScopes.push(paramFrame);
+        let body: BlockStatement;
+        try {
+            body = this.parseFunctionBody();
+        } finally {
+            this.paramScopes.pop();
+        }
         const id = new Identifier(name);
         if (returnType) id.returnType = returnType;
         id.isMethod = true; // Mark as method
@@ -1677,7 +1715,11 @@ export class Parser {
         if (this.match(TokenType.IDENTIFIER)) {
             const id = this.advance();
             let name = id.value;
-            if (this.functionNames.has(name) && this.peek().type !== TokenType.LPAREN) {
+            if (
+                this.functionNames.has(name) &&
+                this.peek().type !== TokenType.LPAREN &&
+                !this.isCurrentFunctionParam(name)
+            ) {
                 name = name + '_var';
             }
             return new Identifier(name);

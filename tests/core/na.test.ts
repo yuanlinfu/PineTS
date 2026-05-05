@@ -74,4 +74,47 @@ plot(check ? 1 : 0, "check")
         // close is a valid number, so na(close) = false, plot = 0
         expect(plots['check'].data[0].value).toBe(0);
     });
+
+    it('na as a default parameter value is detected by na(x) inside the function', async () => {
+        // Regression for a bug where Pine functions declaring `param = na`
+        // would have the parameter hold the NAHelper instance when the caller
+        // omitted the argument. `na(param)` returned false on the helper
+        // object — letting subsequent code overwrite valid values with the
+        // helper itself.
+        // The Range-Average-Retest indicator hits this pattern via:
+        //   updateAreaValues(area a_rea, float areaHigh, float areaLow) =>
+        //       if not na(areaHigh)
+        //           a_rea.areaHigh := areaHigh
+        //       if not na(areaLow)
+        //           a_rea.areaLow := areaLow
+        //   updateLastArea(float areaHigh = na, float areaLow = na) =>
+        //       updateAreaValues(a_rea, areaHigh, areaLow)
+        //   // caller passes only areaHigh → areaLow must remain unchanged
+        const code = `
+//@version=5
+indicator("NA Default Param")
+
+type holder
+    float h
+    float l
+
+setBoth(holder x, float a = na, float b = na) =>
+    if not na(a)
+        x.h := a
+    if not na(b)
+        x.l := b
+
+obj = holder.new(100.0, 200.0)
+setBoth(obj, 999.0)        // only \`a\` provided — \`b\` defaults to na, l must stay 200
+plot(obj.h, "h")
+plot(obj.l, "l")
+plot(na(obj.l) ? 1 : 0, "l_is_na")
+`;
+        const { plots } = await pineTS.run(code);
+        expect(plots['h'].data[0].value).toBe(999);
+        // l was 200 before the call. It must stay 200 — must NOT be clobbered
+        // by the NAHelper instance from the default value of `b`.
+        expect(plots['l'].data[0].value).toBe(200);
+        expect(plots['l_is_na'].data[0].value).toBe(0);
+    });
 });

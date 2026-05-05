@@ -1704,3 +1704,58 @@ plot(val == "#00FF00" ? 1 : 0, "Check")
         expect(result.plots).toBeDefined();
     });
 });
+
+// ---------------------------------------------------------------------------
+// Param shadowing user-function name (regression: leg → leg_var bleed)
+// ---------------------------------------------------------------------------
+describe('Parser Fix: Param shadowing user-function name', () => {
+    it('does not rewrite param `leg` to `leg_var` when another function is named leg', () => {
+        // Pattern from Range-Average-Retest-Model: function `leg()` declares
+        // `var leg = 0` (renamed to `leg_var` to avoid colliding with the fn
+        // name). A separate function `startOfNewLeg(int leg)` has a parameter
+        // named `leg` — its body must reference `leg`, not `leg_var`.
+        const code = `
+//@version=5
+indicator("Param Shadow Test")
+leg() =>
+    var leg = 0
+    if close > open
+        leg := 1
+    leg
+
+startOfNewLeg(int leg) => ta.change(leg) != 0
+
+currentLeg = leg()
+plot(startOfNewLeg(currentLeg) ? 1 : 0)
+`;
+        const result = pineToJS(code);
+        expect(result.success).toBe(true);
+        const js = result.code as string;
+        // The local var inside leg() is renamed to avoid colliding with fn name
+        expect(js).toMatch(/function\s+leg\s*\(\s*\)\s*\{[\s\S]*var\s+leg_var\s*=\s*0/);
+        // BUT: the param `leg` in startOfNewLeg must not be rewritten to leg_var
+        expect(js).toMatch(/function\s+startOfNewLeg\s*\(\s*leg\s*\)\s*\{[\s\S]*ta\.change\(leg\)/);
+        expect(js).not.toMatch(/function\s+startOfNewLeg\s*\(\s*leg\s*\)\s*\{[\s\S]*ta\.change\(leg_var\)/);
+    });
+
+    it('runs at runtime without ReferenceError (leg_var is not defined)', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', '60', null, new Date('2024-01-01').getTime(), new Date('2024-01-10').getTime());
+        const code = `
+//@version=5
+indicator("Param Shadow Runtime")
+leg() =>
+    var leg = 0
+    if close > open
+        leg := 1
+    leg
+
+startOfNewLeg(int leg) => ta.change(leg) != 0
+
+currentLeg = leg()
+plot(startOfNewLeg(currentLeg) ? 1 : 0)
+`;
+        const r = await pineTS.run(code);
+        expect(r).toBeDefined();
+        expect(r.plots).toBeDefined();
+    });
+});
