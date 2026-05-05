@@ -471,6 +471,52 @@ export function transformMemberExpression(memberNode: any, originalParamName: st
         delete memberNode.object;
         delete memberNode.property;
         delete memberNode.computed;
+        return;
+    }
+
+    // Subscript on a UDT-field chain: `bar.low[N]` where `bar` is a user
+    // variable known to hold a UDT instance.
+    //
+    // Pine semantics: `bar.low[N]` reads bar's `.low` from N bars ago.
+    // Since `bar = BAR.new()` runs every bar, `$.let.glb1_bar` is a Series
+    // of PineTypeObject instances → `$.get(glb1_bar, N).low` is correct.
+    //
+    // The rewrite is gated by `scopeManager.isUdtInstance(leafBaseName)` so it
+    // does NOT fire for JS-style array indexing (e.g. `pl.points[0]` where
+    // `pl` is initialized via `polyline.new(...)` — a built-in, not in the
+    // UDT registry).
+    if (memberNode.computed && memberNode.object && memberNode.object.type === 'MemberExpression') {
+        // Walk down to find the leaf base of the chain.
+        let cursor: any = memberNode.object;
+        while (cursor.object && cursor.object.type === 'MemberExpression') {
+            cursor = cursor.object;
+        }
+        if (
+            cursor.object && cursor.object.type === 'Identifier' &&
+            scopeManager.isUdtInstance(cursor.object.name)
+        ) {
+            const baseName = cursor.object.name;
+            // For UDT-typed function parameters (Case 2), the leaf must stay a
+            // plain identifier — the parameter is bound directly to the Series
+            // of UDT instances passed in by the caller. For globally-scoped
+            // UDT instances, fall through to the standard scoped reference.
+            const baseRef = scopeManager.isLocalSeriesVar(baseName)
+                ? (() => {
+                      const id = ASTFactory.createIdentifier(baseName);
+                      id._skipTransformation = true;
+                      return id;
+                  })()
+                : createScopedVariableReference(baseName, scopeManager);
+            // Replace leaf `bar` with `$.get(<base-ref>, lookback)` and drop
+            // the outer `[N]` — the chain (`.low`) now reads from the previous
+            // bar's UDT instance.
+            cursor.object = ASTFactory.createGetCall(baseRef, memberNode.property);
+            // Re-anchor memberNode to the (now-rewritten) inner MemberExpression.
+            const inner = memberNode.object;
+            Object.assign(memberNode, inner);
+            delete memberNode.computed;
+            return;
+        }
     }
 }
 
@@ -898,11 +944,82 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
     const isPropertyAccess = arg.type === 'MemberExpression' && !arg.computed;
 
     if (isArrayAccess) {
+        // UDT field subscript: `bar.field[N]` (and chained `bar.outer.inner[N]`)
+        // where the leaf base is a registered UDT instance. Pine semantics:
+        // `bar = BAR.new()` runs every bar, so `$.let.glb1_bar` is a Series of
+        // PineTypeObject instances; `$.get(<scoped-bar>, N).field` returns the
+        // field value at N bars ago.
+        //
+        // The default `$.param(scalar, N, name)` wrapping is WRONG for this
+        // pattern when the call site is inside a conditional block — the
+        // accumulated history is per-call, not per-bar, so lookback skips
+        // over bars where the if-branch didn't fire and returns stale values
+        // from the *previous firing* instead of from N bars ago in time.
+        // Direct lookback on the bar series bypasses the param machinery
+        // entirely and works correctly regardless of call-site conditionality.
+        if (arg.object && arg.object.type === 'MemberExpression') {
+            let cursor: any = arg.object;
+            while (cursor.object && cursor.object.type === 'MemberExpression') {
+                cursor = cursor.object;
+            }
+            if (cursor.object?.type === 'Identifier' &&
+                scopeManager.isUdtInstance(cursor.object.name)) {
+                const baseName = cursor.object.name;
+                // Function-parameter UDT (Case 2): leaf must stay a plain
+                // identifier — the param is already bound to the Series of
+                // UDT instances passed in by the caller.
+                const baseRef = scopeManager.isLocalSeriesVar(baseName)
+                    ? (() => {
+                          const id = ASTFactory.createIdentifier(baseName);
+                          id._skipTransformation = true;
+                          return id;
+                      })()
+                    : createScopedVariableReference(baseName, scopeManager);
+                cursor.object = ASTFactory.createGetCall(baseRef, arg.property);
+                // `arg.object` is now the rewritten `$.get(<base>, N).field…`
+                // chain; it replaces the whole `arg` expression. The outer
+                // `$.param(...)` wrapper that the rest of this branch would
+                // have applied is intentionally skipped — the lookback is
+                // already baked into `$.get(...)`.
+                return arg.object;
+            }
+        }
+
         // Ensure complex objects are transformed before being used as array source
         if (arg.object.type === 'CallExpression') {
             transformCallExpression(arg.object, scopeManager);
         } else if (arg.object.type === 'MemberExpression') {
             transformMemberExpression(arg.object, '', scopeManager);
+            // Regression: `transformMemberExpression` early-returns for non-computed
+            // access on context-bound user variables (relying on a later top-level
+            // identifier walker to scope the base). But here the result is about to
+            // be wrapped in `$.param(...)` immediately, so the later walker never
+            // runs and the base identifier ends up bare in the emitted code.
+            // Pattern that hits this:  `bar.low[1]` where `bar` is a UDT instance.
+            // Walk into the MemberExpression chain and scope the leaf base when it
+            // is a user-declared variable (not a built-in / namespace / loop var /
+            // function param / local series).
+            let baseHolder: any = arg.object;
+            while (baseHolder && baseHolder.type === 'MemberExpression' && baseHolder.object) {
+                if (baseHolder.object.type === 'Identifier') {
+                    const base = baseHolder.object;
+                    const [scopedName] = scopeManager.getVariable(base.name);
+                    const isUserVariable = scopedName !== base.name;
+                    if (
+                        isUserVariable &&
+                        !scopeManager.isContextBound(base.name) &&
+                        !scopeManager.isRootParam(base.name) &&
+                        !scopeManager.isLoopVariable(base.name) &&
+                        !scopeManager.isLocalSeriesVar(base.name) &&
+                        !NAMESPACES_LIKE.includes(base.name) &&
+                        !KNOWN_NAMESPACES.includes(base.name)
+                    ) {
+                        baseHolder.object = createScopedVariableAccess(base.name, scopeManager);
+                    }
+                    break;
+                }
+                baseHolder = baseHolder.object;
+            }
         } else if (arg.object.type === 'BinaryExpression') {
             arg.object = getParamFromBinaryExpression(arg.object, scopeManager, namespace);
         } else if (arg.object.type === 'LogicalExpression') {
@@ -1368,8 +1485,21 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
             // Create $.call access
             const contextCall = ASTFactory.createMemberExpression(ASTFactory.createContextIdentifier(), ASTFactory.createIdentifier('call'));
 
+            // Pine UFCS: a method `method foo(X this, ...)` can be called via
+            // `foo(receiver, args)` as well as `obj.foo(args)`. When the Pine
+            // name has NO regular function form (only the method), retarget
+            // the direct-call callee to the `$M_` JS identifier — otherwise
+            // `foo` is unbound at runtime ("foo is not defined"). When both
+            // forms exist, the regular function takes precedence.
+            const calleeName = node.callee.name;
+            let fnRef: any = node.callee;
+            if (scopeManager.isUserMethod(calleeName) && !scopeManager.isRegularUserFunction(calleeName)) {
+                fnRef = ASTFactory.createIdentifier(`$M_${calleeName}`);
+                fnRef._skipTransformation = true;
+            }
+
             // Construct new arguments list: [originalFn, callId, ...originalArgs]
-            const newArgs = [node.callee, callId, ...node.arguments];
+            const newArgs = [fnRef, callId, ...node.arguments];
 
             // Update node
             node.callee = contextCall;
@@ -1403,7 +1533,17 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
         // method call on the object, never a call to a user-defined function.
         const isUserMethod = scopeManager.isUserMethod(methodName);
 
-        if (isUserFunction && isUserMethod && !scopeManager.isContextBound(methodName) && !isBuiltinMethodOnParam && !isChainedPropertyMethod) {
+        // Receiver-type guard: only retarget `obj.method()` when `obj` is a known
+        // UDT instance. Without this guard, names that collide with user methods
+        // would also retarget for built-in receivers — e.g. a `method delete(...)`
+        // declared on a UDT would hijack `someLine.delete()` calls. Narrowing on
+        // `isUdtInstance` keeps built-in calls intact.
+        // The receiver may have already been wrapped into a `$.get(...)` call by
+        // an earlier pass — but the original Identifier name is preserved on
+        // the wrapper as `.name`, so a single lookup covers both shapes.
+        const isReceiverUdtInstance = !!_obj.name && scopeManager.isUdtInstance(_obj.name);
+
+        if (isUserFunction && isUserMethod && !scopeManager.isContextBound(methodName) && !isBuiltinMethodOnParam && !isChainedPropertyMethod && isReceiverUdtInstance) {
             // It's a user variable/function.
             // Transform obj.method(args) -> method(obj, args)
             // 1. Get the object (first arg)
@@ -1440,11 +1580,12 @@ export function transformCallExpression(node: any, scopeManager: ScopeManager, n
 
             // The method identifier needs to be transformed to its scoped name if necessary
             // But here 'method' is just the property name node. We need an Identifier for the function.
-            // Since function declarations are not renamed in transformFunctionDeclaration and are local identifiers,
-            // we should use the identifier directly.
+            // Methods are emitted with a `$M_` prefix on their JS name to avoid
+            // collision with regular functions of the same Pine name. Resolve
+            // the call against the prefixed JS identifier.
             // Mark with _skipTransformation to prevent the identifier from being resolved
             // to a same-named variable (e.g. `isSame2` function vs `isSame2` variable).
-            const functionRef = ASTFactory.createIdentifier(methodName);
+            const functionRef = ASTFactory.createIdentifier(`$M_${methodName}`);
             functionRef._skipTransformation = true;
 
             const newArgs = [functionRef, callId, transformedObj, ...transformedArgs];

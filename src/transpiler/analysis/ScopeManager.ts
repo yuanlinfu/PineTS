@@ -64,6 +64,77 @@ export class ScopeManager {
     private reservedNames: Set<string> = new Set();
     private userFunctions: Set<string> = new Set();
     private userMethods: Set<string> = new Set();
+    /**
+     * Regular user-declared functions (i.e. NOT methods). Tracked separately
+     * from `userFunctions` so a UFCS-style direct call to a method-only
+     * declaration (`foo(receiver, args)` where `foo` was declared as
+     * `method foo(...)`) can be retargeted to the prefixed JS name.
+     *
+     * If a Pine name has both a regular function and a method form, the
+     * regular function takes precedence for direct `name(args)` calls and
+     * the method is reachable via dot-syntax `obj.name(args)`.
+     */
+    private regularUserFunctions: Set<string> = new Set();
+
+    /**
+     * Registry of user-defined UDT type names → their field map (fieldName → fieldType).
+     * Populated from `const X = Type({fieldA: ['type', default], ...})` declarations
+     * (which pine2js emits from Pine `type X` declarations).
+     *
+     * V2 data model: stores field-type metadata. V1 logic only consults
+     * `isUdtTypeName` for now; field metadata is ready for future use-site
+     * type-aware rewrites (nested UDT chains, mixed scalar/array fields, etc.).
+     */
+    private udtTypeNames: Map<string, Record<string, string>> = new Map();
+
+    /**
+     * Registry of user variables that hold UDT instances → the UDT type name.
+     * Populated from `let bar = X.new(...)` / `bar = X.copy(...)` where
+     * `X ∈ udtTypeNames`. Stores the type name (V2 shape) so future passes
+     * can do typed-field lookups via `getUdtTypeFields(typeName)` without
+     * a refactor. V1 logic only consults `isUdtInstance`.
+     */
+    private udtInstances: Map<string, string> = new Map();
+
+    /**
+     * Registry of user-defined function names → UDT type they return.
+     * Populated by inspecting each FunctionDeclaration's return paths during
+     * the UDT pre-pass. A function is registered only when ALL return paths
+     * unambiguously produce the SAME UDT type.
+     *
+     * Used by the instance populator so that `bar = makeBar()` registers
+     * `bar` as a UDT instance when `makeBar` is known to return one.
+     */
+    private functionReturnTypes: Map<string, string> = new Map();
+
+    /**
+     * Registry of user-defined function names → tuple of UDT type names they
+     * return. Each slot holds either the UDT type name at that position, or
+     * `undefined` when that position is not (unambiguously) a UDT instance.
+     *
+     * Populated when ALL return paths of a function are ArrayExpressions of
+     * the SAME length and each position resolves to the SAME UDT (or to
+     * something non-UDT, which becomes `undefined`).
+     *
+     * Used by the instance populator so that `[a, b] = makeBars()` registers
+     * `a` and `b` as UDT instances at their respective tuple positions.
+     */
+    private functionReturnTupleTypes: Map<string, (string | undefined)[]> = new Map();
+
+    /**
+     * Registry of user-defined function names → map of {paramName → UDT type}.
+     * Populated from `<funcName>.__pineParamTypes__ = {...}` markers emitted
+     * by pine2js codegen for parameters that carried a Pine type annotation
+     * (e.g. `readField(BAR b)`). Filtered to UDT-known types so non-UDT
+     * annotations like `int` / `float` / `string` never enter the map.
+     *
+     * Consumed by `transformFunctionDeclaration`: when entering a function's
+     * body, each typed param is temporarily registered as a UDT instance
+     * (`markVariableAsUdtInstance`) so the use-site rewrite for `b.field[N]`
+     * fires inside the body. The registration is removed when leaving the
+     * function scope, keeping the global registry clean.
+     */
+    private functionParamUdtTypes: Map<string, Record<string, string>> = new Map();
 
     public get nextParamIdArg(): any {
         return {
@@ -147,6 +218,99 @@ export class ScopeManager {
         return this.localSeriesVars.has(name);
     }
 
+    // ── UDT registry ────────────────────────────────────────────────────
+    // V2-shape data model populated up-front; V1 logic only uses the
+    // boolean checks (`isUdtTypeName`, `isUdtInstance`) at use sites.
+    // Field-type metadata and per-variable UDT-type lookups are ready
+    // for future use (nested-field type discrimination, etc.).
+
+    addUdtTypeName(typeName: string, fields: Record<string, string> = {}): void {
+        this.udtTypeNames.set(typeName, fields);
+    }
+
+    isUdtTypeName(name: string): boolean {
+        return this.udtTypeNames.has(name);
+    }
+
+    getUdtTypeFields(typeName: string): Record<string, string> | undefined {
+        return this.udtTypeNames.get(typeName);
+    }
+
+    markVariableAsUdtInstance(varName: string, typeName: string): void {
+        this.udtInstances.set(varName, typeName);
+    }
+
+    getVariableUdtType(varName: string): string | undefined {
+        return this.udtInstances.get(varName);
+    }
+
+    isUdtInstance(varName: string): boolean {
+        return this.udtInstances.has(varName);
+    }
+
+    /**
+     * Record a user-defined function as returning a specific UDT type.
+     * Idempotent — re-registering with the same type is a no-op; conflicting
+     * registrations (different type) drop back to "unknown" by removing the
+     * entry, so an ambiguous function never falsely promotes a caller.
+     */
+    setFunctionReturnType(funcName: string, typeName: string): void {
+        const existing = this.functionReturnTypes.get(funcName);
+        if (existing && existing !== typeName) {
+            this.functionReturnTypes.delete(funcName);
+            return;
+        }
+        this.functionReturnTypes.set(funcName, typeName);
+    }
+
+    getFunctionReturnType(funcName: string): string | undefined {
+        return this.functionReturnTypes.get(funcName);
+    }
+
+    /**
+     * Record a user-defined function as returning a tuple whose positions
+     * carry specific UDT types (or `undefined` for non-UDT positions).
+     * Idempotent — re-registering with the same shape is a no-op; conflicting
+     * registrations (different length OR different type at any position) drop
+     * the entry, so an ambiguous function never falsely promotes a caller.
+     */
+    setFunctionReturnTupleType(funcName: string, tupleTypes: (string | undefined)[]): void {
+        const existing = this.functionReturnTupleTypes.get(funcName);
+        if (existing) {
+            if (existing.length !== tupleTypes.length ||
+                existing.some((t, i) => t !== tupleTypes[i])) {
+                this.functionReturnTupleTypes.delete(funcName);
+                return;
+            }
+        }
+        this.functionReturnTupleTypes.set(funcName, tupleTypes);
+    }
+
+    getFunctionReturnTupleType(funcName: string): (string | undefined)[] | undefined {
+        return this.functionReturnTupleTypes.get(funcName);
+    }
+
+    /**
+     * Record a user-defined function's UDT-typed parameters. The argument
+     * is a `paramName → UDT type` map filtered down to UDT-known types only.
+     */
+    setFunctionParamUdtTypes(funcName: string, paramTypes: Record<string, string>): void {
+        this.functionParamUdtTypes.set(funcName, paramTypes);
+    }
+
+    getFunctionParamUdtTypes(funcName: string): Record<string, string> | undefined {
+        return this.functionParamUdtTypes.get(funcName);
+    }
+
+    /**
+     * Remove a previously-registered UDT instance entry. Used to roll back
+     * scope-local registrations (e.g. UDT-typed function parameters) when
+     * leaving the function body, so the global registry stays clean.
+     */
+    unmarkVariableAsUdtInstance(varName: string): void {
+        this.udtInstances.delete(varName);
+    }
+
     addContextBoundVar(name: string, isRootParam: boolean = false): void {
         // Register a variable as context-bound, with optional root parameter flag
         this.contextBoundVars.add(name);
@@ -222,6 +386,14 @@ export class ScopeManager {
 
     isUserMethod(name: string): boolean {
         return this.userMethods.has(name);
+    }
+
+    addRegularUserFunction(name: string): void {
+        this.regularUserFunctions.add(name);
+    }
+
+    isRegularUserFunction(name: string): boolean {
+        return this.regularUserFunctions.has(name);
     }
 
     addVariable(name: string, kind: string): string {

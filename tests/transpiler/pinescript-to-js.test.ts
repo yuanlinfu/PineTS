@@ -1420,7 +1420,7 @@ plot(close)
 
             expect(jsCode).toBeDefined();
             // The variable 'plus' should be renamed to avoid collision with function 'plus'
-            expect(jsCode).toContain('for (const x1 of $.get(X1, 0).array)');
+            expect(jsCode).toContain('for (const x1 of $.iter($.get(X1, 0)))');
         });
     });
 });
@@ -1640,7 +1640,7 @@ plot(close)
 
         expect(jsCode).toBeDefined();
         // Should contain for-of loop with $.get() on the iterable
-        expect(jsCode).toContain('for (const x1 of $.get(X1, 0).array)');
+        expect(jsCode).toContain('for (const x1 of $.iter($.get(X1, 0)))');
         // Should NOT contain malformed loop syntax
         expect(jsCode).not.toMatch(/for \([^)]+= undefined[^)]*of/);
     });
@@ -1663,7 +1663,7 @@ plot(close)
         const jsCode = result.toString();
 
         // The iterable should use $.get(), but the loop variable should not be transformed
-        expect(jsCode).toContain('for (const item of $.get(arr, 0).array)');
+        expect(jsCode).toContain('for (const item of $.iter($.get(arr, 0)))');
         expect(jsCode).not.toContain('$$.const.fn1_item');
     });
 
@@ -1685,7 +1685,87 @@ plot(close)
 
         expect(jsCode).toBeDefined();
         // Should contain for-of loop with .entries()
-        expect(jsCode).toContain('for (const [idx, x1] of $.get(X1, 0).array.entries())');
+        expect(jsCode).toContain('for (const [idx, x1] of $.entries($.get(X1, 0)))');
+    });
+
+    it('should handle for-of destructuring over a member expression iterable', () => {
+        // Regression: iterating with [index, value] destructuring over a UDT field
+        // (e.g. eachDay.prices) must route through $.entries() so the runtime can
+        // resolve the underlying array — otherwise destructuring a scalar yielded
+        // by PineArrayObject's [Symbol.iterator] throws "is not iterable".
+        const code = `
+//@version=6
+indicator("For-Of Member Destructuring")
+
+type bucket
+    array<float> prices = na
+
+process(buckets) =>
+    for [i, b] in buckets
+        for [j, p] in b.prices
+            x = p
+
+plot(close)
+        `;
+
+        const result = transpile(code);
+        const jsCode = result.toString();
+
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toContain('for (const [j, p] of $.entries(b.prices))');
+        // Outer loop too — destructuring over a function param identifier
+        expect(jsCode).toContain('for (const [i, b] of $.entries(');
+    });
+
+    it('should wrap non-destructuring iteration over a member expression with $.iter', () => {
+        // Regression: built-ins like box.all return plain JS arrays (not PineArrayObject).
+        // Previously the codegen emitted `<expr>.array` unconditionally for member-expr
+        // iterables, which broke `for element in box.all` because plain arrays have no
+        // `.array` field. The $.iter helper handles both shapes uniformly.
+        const code = `
+//@version=6
+indicator("ForOf MemberExpr Plain JS Array")
+
+if true
+    for element in box.all
+        element.delete()
+    for ln in line.all
+        ln.delete()
+
+plot(close)
+        `;
+
+        const result = transpile(code);
+        const jsCode = result.toString();
+
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toContain('for (const element of $.iter(box.all))');
+        expect(jsCode).toContain('for (const ln of $.iter(line.all))');
+        // Must NOT regress to the broken `.array` form
+        expect(jsCode).not.toContain('box.all.array');
+        expect(jsCode).not.toContain('line.all.array');
+    });
+
+    it('should handle for-of destructuring over a built-in plain JS array', () => {
+        // Symmetric to the non-destructuring case: `for [i, el] in box.all` must work
+        // even though box.all is a plain JS array (not a PineArrayObject).
+        const code = `
+//@version=6
+indicator("ForOf MemberExpr Destructuring Plain JS")
+
+if true
+    for [i, el] in box.all
+        x = i
+
+plot(close)
+        `;
+
+        const result = transpile(code);
+        const jsCode = result.toString();
+
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toContain('for (const [i, el] of $.entries(box.all))');
+        expect(jsCode).not.toContain('box.all.array');
     });
 
     it('should handle for-of loops with nested operations', () => {
@@ -1707,7 +1787,7 @@ plot(close)
         const jsCode = result.toString();
 
         expect(jsCode).toBeDefined();
-        expect(jsCode).toContain('for (const val of $.get(values, 0).array)');
+        expect(jsCode).toContain('for (const val of $.iter($.get(values, 0)))');
         // The temp variable inside the loop should be transformed
         expect(jsCode).toMatch(/\$\$\.let\.fn\d+_temp/);
     });
@@ -1734,8 +1814,8 @@ plot(close)
         const result = transpile(code);
         const jsCode = result.toString();
 
-        expect(jsCode).toContain('for (const x of $.get(arr1, 0).array)');
-        expect(jsCode).toContain('for (const y of $.get(arr2, 0).array)');
+        expect(jsCode).toContain('for (const x of $.iter($.get(arr1, 0)))');
+        expect(jsCode).toContain('for (const y of $.iter($.get(arr2, 0)))');
     });
 
     it('should handle for-of with array operations', () => {
@@ -1758,7 +1838,351 @@ plot(result)
         const jsCode = result.toString();
 
         expect(jsCode).toBeDefined();
-        expect(jsCode).toContain('for (const element of $.get(arr, 0).array)');
+        expect(jsCode).toContain('for (const element of $.iter($.get(arr, 0)))');
+    });
+});
+
+describe('Pine Script Transpilation - Type-as-function (typed-na pattern)', () => {
+    // Pine v6 lets you write `<TypeName>(value)` to wrap/cast a value as that type.
+    // The most common use is `box(na)`, `line(na)` etc. inside UDT initializers
+    // where a typed-na is needed. The transpiler must rewrite this to
+    // `<TypeName>.any(...)` — calling the namespace directly fails because the
+    // namespace object isn't callable. Each namespace's `any()` method delegates
+    // to `new()`.
+
+    it('rewrites box(na) → box.any(...) so the namespace call resolves at runtime', () => {
+        // Regression: `box(na)` previously emitted as a literal `box(...)` call,
+        // which threw "box is not a function" because BoxHelper isn't callable.
+        const code = `
+//@version=6
+indicator("box(na) typed-na", overlay=true)
+b = box(na)
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toContain('box.any(');
+        // Must NOT regress to the broken raw-call form (no "box(p" — but allow box.new(, box.any(, etc.)
+        expect(jsCode).not.toMatch(/[^.\w]box\(p\d+/);
+    });
+
+    it('rewrites line(na) → line.any(...) (already-working case kept stable)', () => {
+        const code = `
+//@version=6
+indicator("line(na) typed-na", overlay=true)
+l = line(na)
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('line.any(');
+        expect(jsCode).not.toMatch(/[^.\w]line\(p\d+/);
+    });
+
+    it('rewrites linefill(na) → linefill.any(...)', () => {
+        const code = `
+//@version=6
+indicator("linefill(na) typed-na", overlay=true)
+lf = linefill(na)
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('linefill.any(');
+        expect(jsCode).not.toMatch(/[^.\w]linefill\(p\d+/);
+    });
+
+    it('rewrites polyline(na) → polyline.any(...)', () => {
+        const code = `
+//@version=6
+indicator("polyline(na) typed-na", overlay=true)
+p = polyline(na)
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('polyline.any(');
+        expect(jsCode).not.toMatch(/[^.\w]polyline\(p\d+/);
+    });
+
+    it('rewrites table(na) → table.any(...)', () => {
+        const code = `
+//@version=6
+indicator("table(na) typed-na", overlay=true)
+t = table(na)
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('table.any(');
+        expect(jsCode).not.toMatch(/[^.\w]table\(p\d+/);
+    });
+});
+
+describe('Pine Script Transpilation - Contextual keywords as UDT field names', () => {
+    // Pine v5/v6 treats `type`, `method`, `enum` as contextual keywords:
+    // they're reserved only when they introduce a declaration. Elsewhere they're
+    // valid identifiers — most notably as UDT field names like `int type = 0`.
+
+    it('parses `type` as a UDT field name', () => {
+        // Regression: "Expected IDENTIFIER but got KEYWORD at <line:col>"
+        const code = `
+//@version=6
+indicator("UDT field named type", overlay=true)
+type MS
+    int type = 0
+
+m = MS.new(5)
+plot(m.type)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        // The field should be present in the type definition / object initialization
+        expect(jsCode).toMatch(/type\s*[:=]/);
+    });
+
+    it('parses `method` as a UDT field name', () => {
+        const code = `
+//@version=6
+indicator("UDT field named method", overlay=true)
+type Action
+    string method = "click"
+
+a = Action.new("hover")
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toMatch(/method\s*[:=]/);
+    });
+
+    it('parses `enum` as a UDT field name', () => {
+        const code = `
+//@version=6
+indicator("UDT field named enum", overlay=true)
+type Item
+    int enum = 1
+
+i = Item.new(2)
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        expect(jsCode).toMatch(/enum\s*[:=]/);
+    });
+
+    it('still rejects `type` at the START of a top-level declaration line', () => {
+        // Sanity check: the contextual-keyword relaxation must NOT break the
+        // primary syntactic role of `type` as a UDT-introducer keyword.
+        const code = `
+//@version=6
+indicator("type still works as keyword")
+type Foo
+    int x = 1
+
+f = Foo.new(5)
+plot(f.x)
+        `;
+        // Should parse cleanly, with the `type` keyword properly consumed
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        // The Foo type should still produce a constructor / type wiring
+        expect(jsCode).toContain('Foo');
+    });
+});
+
+describe('Pine Script Transpilation - Comma-separated typed declarations', () => {
+    // Pine v6 allows multiple typed variable declarations on a single line
+    // sharing the leading type qualifier:
+    //   float a = 0.0, b = 1.0, c = 2.0
+    // Each segment after the first comma is `name = expr` with the captured
+    // type re-applied. The parser previously only handled this for var/varip
+    // chains (`var int x = 1, var int y = 2`).
+
+    it('parses comma-separated float declarations sharing the type', () => {
+        // Regression: previously failed with "Unexpected token COMMA ',' at <line:col>"
+        const code = `
+//@version=6
+indicator("multi-float decl")
+my_func() =>
+    float sumW = 0.0, sumWX = 0.0, sumWY = 0.0
+    sumW + sumWX + sumWY
+plot(my_func())
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        // All three identifiers must end up as separate scoped bindings
+        expect(jsCode).toContain('fn1_sumW');
+        expect(jsCode).toContain('fn1_sumWX');
+        expect(jsCode).toContain('fn1_sumWY');
+        // None must end up swallowed as a sub-expression of the previous initializer
+        expect(jsCode).not.toMatch(/sumW\s*=\s*\([^)]*sumWX/);
+    });
+
+    it('parses comma-separated int declarations sharing the type', () => {
+        const code = `
+//@version=6
+indicator("multi-int decl")
+my_func() =>
+    int aa = 1, bb = 2, cc = 3
+    aa + bb + cc
+plot(my_func())
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('fn1_aa');
+        expect(jsCode).toContain('fn1_bb');
+        expect(jsCode).toContain('fn1_cc');
+    });
+
+    it('parses comma-separated bool declarations sharing the type', () => {
+        const code = `
+//@version=6
+indicator("multi-bool decl")
+my_func() =>
+    bool xx = true, yy = false
+    xx or yy
+plot(my_func() ? 1 : 0)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('fn1_xx');
+        expect(jsCode).toContain('fn1_yy');
+        // Both literal values must be present somewhere in the initializers
+        expect(jsCode).toContain('true');
+        expect(jsCode).toContain('false');
+    });
+
+    it('parses comma-separated string declarations sharing the type', () => {
+        const code = `
+//@version=6
+indicator("multi-string decl")
+my_func() =>
+    string ss = "hello", tt = "world"
+    ss + tt
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('fn1_ss');
+        expect(jsCode).toContain('fn1_tt');
+        expect(jsCode).toMatch(/['"]hello['"]/);
+        expect(jsCode).toMatch(/['"]world['"]/);
+    });
+
+    it('parses comma-separated qualified-type declarations (series float)', () => {
+        const code = `
+//@version=6
+indicator("multi series-float decl")
+series float ema1 = 0.0, ema2 = 0.0
+plot(ema1 + ema2)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        // Both bindings emitted at global scope (glb1_*)
+        expect(jsCode).toContain('glb1_ema1');
+        expect(jsCode).toContain('glb1_ema2');
+    });
+
+    it('parses comma-separated generic-type declarations (array<float>)', () => {
+        const code = `
+//@version=6
+indicator("multi generic-type decl")
+my_func() =>
+    array<float> pp = na, qq = na
+    array.size(pp) + array.size(qq)
+plot(my_func())
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toContain('fn1_pp');
+        expect(jsCode).toContain('fn1_qq');
+    });
+
+    it('does not consume commas belonging to outer constructs', () => {
+        // Sanity check: a single typed decl followed by a function call
+        // (whose args are comma-separated) must not pull those args into the decl.
+        const code = `
+//@version=6
+indicator("guard")
+my_func() =>
+    float a = 1.0
+    math.max(a, 2.0, 3.0)
+plot(my_func())
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        // math.max called normally
+        expect(jsCode).toMatch(/math\.max\(/);
+        // The constants `2` and `3` from math.max args must not have been
+        // mis-treated as additional declarators (which would emit fn1_2 etc.)
+        expect(jsCode).not.toMatch(/fn1_2\b/);
+        expect(jsCode).not.toMatch(/fn1_3\b/);
+    });
+});
+
+describe('Pine Script Transpilation - User function names colliding with JS reserved keywords', () => {
+    // Pine allows user-defined functions/methods named after JS reserved keywords
+    // (e.g. `method delete(...)`). The codegen must rename these consistently at
+    // both the declaration site (`function delete()` is invalid JS) and at any
+    // direct call site, while leaving method-style invocations (`obj.delete()`)
+    // alone since JS allows reserved words as property names.
+
+    it('renames user method named `delete` so generated JS parses', () => {
+        // Regression: previously emitted `function delete()` → "Unexpected keyword 'delete'"
+        const code = `
+//@version=6
+indicator("delete method", overlay=true)
+type Foo
+    int x
+method delete(Foo this) =>
+    this.x := 0
+
+f = Foo.new(1)
+f.delete()
+plot(close)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        expect(jsCode).toBeDefined();
+        // Declaration must NOT be the bare reserved word (would break JS parse).
+        expect(jsCode).not.toMatch(/function\s+delete\s*\(/);
+        // Method declarations get a `$M_` JS prefix that is collision-proof
+        // by construction — no `_$N` reserved-name suffix is needed (and adding
+        // one would break Pine-name lookup at the call site, since the AnalysisPass
+        // strips only `$M_` to recover the Pine name `delete`).
+        expect(jsCode).toMatch(/function\s+\$M_delete\s*\(/);
+        // The Pine call site `f.delete()` retargets to `$.call($M_delete, ...)`
+        // when the receiver is a known UDT instance.
+        expect(jsCode).toMatch(/\$\.call\s*\(\s*\$M_delete\b/);
+    });
+
+    it('renames direct call to a user function named after a JS reserved word', () => {
+        // When a user function name is renamed, direct CallExpression callees
+        // referencing it must be renamed too. (Method-style `obj.delete()` is
+        // a property access and stays as `obj.delete()`.)
+        const code = `
+//@version=6
+indicator("direct call to user delete()")
+delete(int x) =>
+    x + 1
+y = delete(5)
+plot(y)
+        `;
+        const result = transpile(code);
+        const jsCode = result.toString();
+        // Declaration renamed
+        expect(jsCode).toMatch(/function\s+delete_\$\d+\s*\(/);
+        // Direct call site renamed too — same rename
+        expect(jsCode).toMatch(/delete_\$\d+\(/);
+        // Must NOT leave a bare `delete(` call (would fail JS parse if `delete` is the keyword)
+        expect(jsCode).not.toMatch(/[^_\w]delete\(\d/);
     });
 });
 

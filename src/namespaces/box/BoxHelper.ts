@@ -45,7 +45,7 @@ export class BoxHelper {
     public syncToPlot() {
         this._ensurePlotsEntry();
         const time = this.context.marketData[0]?.openTime || 0;
-        const allPlotData = this._boxes.map(bx => bx.toPlotData());
+        const allPlotData = this._boxes.filter(bx => !bx._deleted).map(bx => bx.toPlotData());
 
         // Split force_overlay objects into a separate overlay plot (renders on main chart pane)
         const regular = allPlotData.filter((b: any) => !b.force_overlay);
@@ -91,13 +91,15 @@ export class BoxHelper {
     }
 
     /**
-     * Resolve a color value, preserving NaN (na) so renderers can detect "no color".
-     * The regular `_resolve(val) || fallback` pattern treats NaN as falsy and replaces
-     * it with the default, losing the explicit `border_color = na` intent.
+     * Resolve a color value, preserving na markers so renderers can detect "no color".
+     * Pine emits na either as NaN (from `bgcolor = na`) or as null (from
+     * `bgcolor = color(na)` — `color(na)` returns null per PineColor.any). Both
+     * must survive — replacing them with a default would force renderers to paint
+     * a visible color where the script asked for none.
      */
     private _resolveColor(val: any, fallback: string): any {
         const resolved = this._resolve(val);
-        // NaN means `na` in Pine Script — preserve it so renderers can detect it
+        if (resolved === null || resolved === undefined) return resolved;
         if (typeof resolved === 'number' && isNaN(resolved)) return NaN;
         return resolved || fallback;
     }
@@ -202,7 +204,25 @@ export class BoxHelper {
         );
     }
 
-    any(...args: any[]): BoxObject {
+    any(...args: any[]): BoxObject | null {
+        // Pine `box(arg)` is a type cast / typed-na, NOT a constructor:
+        //   box bx = box(na)         → typed-na (na(bx) is true)
+        //   box bx = box(some_box)   → no-op cast (bx === some_box)
+        // The constructor is `box.new(...)`. Multi-arg calls fall through to
+        // .new() to preserve any incidental usage.
+        if (args.length === 1) {
+            const arg = args[0];
+            if (arg === null || arg === undefined) return null;
+            if (arg instanceof NAHelper) return null;
+            if (typeof arg === 'number' && isNaN(arg)) return null;
+            if (arg instanceof BoxObject) return arg;
+            if (arg instanceof Series) {
+                const v = arg.get(0);
+                if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return null;
+                if (v instanceof BoxObject) return v;
+            }
+            return null;
+        }
         return this.new(...args);
     }
 

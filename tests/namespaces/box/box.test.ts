@@ -407,4 +407,40 @@ describe('BOX Namespace', () => {
         expect(Array.isArray(boxes)).toBe(true);
         expect(boxes.length).toBeGreaterThanOrEqual(3);
     });
+
+    // Regression: `bgcolor = color(na)` and `border_color = color(na)` must
+    // reach QFChart as a na marker (null), not be substituted with the
+    // default Pine blue (`#2962ff`) by the helper. `color(na)` returns null,
+    // and the helper used to drop null via `resolved || fallback`.
+    it('box.new() preserves na from color(na) — does not substitute default blue', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', 50, new Date('2025-01-01').getTime(), new Date('2025-03-01').getTime());
+
+        const { plots } = await pineTS.run(`//@version=6
+indicator("probe", overlay = true)
+if barstate.isfirst
+    box bx = box.new(0, 100, 5, 50, bgcolor = color(na), border_color = color(na))
+`);
+        const bx = plots['__boxes__']?.data?.[0]?.value?.[0];
+        expect(bx).toBeDefined();
+        expect(bx.bgcolor).not.toBe('#2962ff');
+        expect(bx.border_color).not.toBe('#2962ff');
+        // Should be a na marker — null (from color(na)) or NaN
+        const isNa = (v: any) => v === null || v === undefined || (typeof v === 'number' && isNaN(v));
+        expect(isNa(bx.bgcolor)).toBe(true);
+        expect(isNa(bx.border_color)).toBe(true);
+    });
+
+    it('box.new() preserves NaN from `bgcolor = na` (direct na)', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', 50, new Date('2025-01-01').getTime(), new Date('2025-03-01').getTime());
+
+        const { plots } = await pineTS.run(`//@version=6
+indicator("probe", overlay = true)
+if barstate.isfirst
+    box bx = box.new(0, 100, 5, 50, bgcolor = na, border_color = na)
+`);
+        const bx = plots['__boxes__']?.data?.[0]?.value?.[0];
+        expect(bx).toBeDefined();
+        expect(bx.bgcolor).not.toBe('#2962ff');
+        expect(bx.border_color).not.toBe('#2962ff');
+    });
 });

@@ -55,6 +55,307 @@ export function transformNestedArrowFunctions(ast: any): void {
     });
 }
 
+/**
+ * Pre-walk the AST to populate the UDT registry on the ScopeManager.
+ *
+ * Two registries are populated:
+ *   1. UDT type names — collected from `const X = Type({field: ['type', default], ...})`
+ *      which pine2js emits from Pine `type X` declarations. The field-type metadata
+ *      is stored alongside (V2 data model) for future use-site type-aware rewrites.
+ *
+ *   2. UDT instance variables — variables initialized via `<X>.new(...)` or
+ *      `<X>.copy(...)` where X ∈ udtTypeNames. Each instance is tagged with its
+ *      UDT type name (V2 shape).
+ *
+ * The instance check intentionally consults `isUdtTypeName(X)` rather than just
+ * "X is an Identifier", so built-in factory calls like `array.from(...)`,
+ * `polyline.new(...)`, `chart.point.from_index(...)` are excluded — those are
+ * handled by their own runtime layers and must NOT be treated as UDT instances.
+ */
+export function preProcessUdtRegistry(ast: any, scopeManager: ScopeManager): void {
+    // Pass 1: collect UDT type names (and their field metadata) from `Type({...})` calls.
+    walk.simple(ast, {
+        VariableDeclaration(node: any) {
+            for (const decl of node.declarations) {
+                if (decl.id?.type !== 'Identifier' || !decl.init) continue;
+                if (
+                    decl.init.type === 'CallExpression' &&
+                    decl.init.callee?.type === 'Identifier' &&
+                    decl.init.callee.name === 'Type' &&
+                    decl.init.arguments?.length === 1 &&
+                    decl.init.arguments[0]?.type === 'ObjectExpression'
+                ) {
+                    const fields: Record<string, string> = {};
+                    for (const prop of decl.init.arguments[0].properties) {
+                        if (prop.type !== 'Property' || prop.key?.type !== 'Identifier') continue;
+                        // Each value is `['type', default]` (ArrayExpression) or `'type'` (Literal).
+                        if (prop.value?.type === 'ArrayExpression' && prop.value.elements?.[0]?.type === 'Literal') {
+                            fields[prop.key.name] = String(prop.value.elements[0].value);
+                        } else if (prop.value?.type === 'Literal') {
+                            fields[prop.key.name] = String(prop.value.value);
+                        }
+                    }
+                    scopeManager.addUdtTypeName(decl.id.name, fields);
+                }
+            }
+        },
+    });
+
+    // Pass 1.5: infer user-function return types iteratively.
+    //
+    // A function is recorded as returning a UDT when ALL of its return-path
+    // expressions resolve (via `inferUdtTypeFromInit`) to the SAME UDT type.
+    // It is recorded as returning a tuple when ALL return paths are
+    // ArrayExpressions of the same length and each slot resolves to the
+    // same UDT type (or undefined for non-UDT slots).
+    //
+    // Iteration handles call chains where one helper calls another:
+    //   makeBarHelper() => BAR.new()
+    //   makeBar()       => makeBarHelper()
+    // The first iteration registers `makeBarHelper`; the second uses that
+    // result to register `makeBar`. Loop until no new entries are added.
+    let changed = true;
+    while (changed) {
+        changed = false;
+        walk.simple(ast, {
+            FunctionDeclaration(node: any) {
+                if (!node.id?.name) return;
+                const fnName = node.id.name;
+                const alreadyKnown =
+                    scopeManager.getFunctionReturnType(fnName) ||
+                    scopeManager.getFunctionReturnTupleType(fnName);
+                if (alreadyKnown) return;
+                const returns = collectReturnArguments(node.body);
+                if (returns.length === 0) return;
+
+                // Tuple return: every return path is an ArrayExpression of the
+                // same length, and each slot independently produces the same
+                // UDT (or consistently non-UDT → undefined).
+                if (returns.every((r: any) => r.type === 'ArrayExpression')) {
+                    const len = returns[0].elements.length;
+                    if (len > 0 && returns.every((r: any) => r.elements.length === len)) {
+                        const slotTypes: (string | undefined)[] = [];
+                        let ok = true;
+                        for (let i = 0; i < len; i++) {
+                            const slotPerReturn = returns.map((r: any) =>
+                                inferUdtTypeFromInit(r.elements[i], scopeManager),
+                            );
+                            const first = slotPerReturn[0];
+                            if (!slotPerReturn.every((t) => t === first)) {
+                                ok = false;
+                                break;
+                            }
+                            slotTypes.push(first);
+                        }
+                        // Only register if at least one slot is a UDT — otherwise
+                        // there's nothing to gain.
+                        if (ok && slotTypes.some((t) => !!t)) {
+                            scopeManager.setFunctionReturnTupleType(fnName, slotTypes);
+                            changed = true;
+                            return;
+                        }
+                    }
+                }
+
+                // Scalar UDT return.
+                const types = returns.map((arg: any) => inferUdtTypeFromInit(arg, scopeManager));
+                const first = types[0];
+                if (!first || !types.every((t) => t === first)) return;
+                scopeManager.setFunctionReturnType(fnName, first);
+                changed = true;
+            },
+        });
+    }
+
+    // Pass 2: collect variables initialized to a UDT instance.
+    walk.simple(ast, {
+        VariableDeclaration(node: any) {
+            for (const decl of node.declarations) {
+                if (!decl.init) continue;
+
+                // Scalar binding: `let bar = <init>`.
+                if (decl.id?.type === 'Identifier') {
+                    const typeName = inferUdtTypeFromInit(decl.init, scopeManager);
+                    if (typeName) {
+                        scopeManager.markVariableAsUdtInstance(decl.id.name, typeName);
+                    }
+                    continue;
+                }
+
+                // Tuple destructuring: `let [a, b] = <userFunc>(...)` where the
+                // user function has an inferred tuple return shape. Per-slot
+                // UDT types from the tuple registry register each ArrayPattern
+                // element independently — slots without a UDT are skipped.
+                if (decl.id?.type === 'ArrayPattern' &&
+                    decl.init.type === 'CallExpression' &&
+                    decl.init.callee?.type === 'Identifier') {
+                    const tupleTypes = scopeManager.getFunctionReturnTupleType(decl.init.callee.name);
+                    if (!tupleTypes) continue;
+                    decl.id.elements?.forEach((el: any, i: number) => {
+                        if (!el || el.type !== 'Identifier') return;
+                        const slotType = tupleTypes[i];
+                        if (slotType) {
+                            scopeManager.markVariableAsUdtInstance(el.name, slotType);
+                        }
+                    });
+                }
+            }
+        },
+        // Pass 2b: pick up explicit Pine type annotations preserved by codegen
+        // as bare string-literal markers (`"__pineUdtVar:<varName>=<TypeName>"`).
+        // This covers cases the expression-based inference can't reach — e.g.
+        // `Holder r = arr.get(0)`, `Holder r = map.get(key)`, etc. — where the
+        // Pine type is stated explicitly but the initializer is not directly
+        // recognisable as UDT-producing.
+        ExpressionStatement(node: any) {
+            const expr = node.expression;
+            if (
+                expr?.type === 'Literal' &&
+                typeof expr.value === 'string' &&
+                expr.value.startsWith('__pineUdtVar:')
+            ) {
+                const m = expr.value.match(/^__pineUdtVar:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)$/);
+                if (m) {
+                    const [, varName, typeName] = m;
+                    if (scopeManager.isUdtTypeName(typeName)) {
+                        scopeManager.markVariableAsUdtInstance(varName, typeName);
+                    }
+                }
+            }
+        },
+    });
+
+    // Pass 3: collect UDT-typed function parameters from the
+    // `funcName.__pineParamTypes__ = {paramName: 'TypeName', ...}` markers
+    // emitted by pine2js codegen. Only types that are themselves in the UDT
+    // type registry are kept — primitives / qualifiers like `int`, `series
+    // float` etc. are silently dropped. The registration tells
+    // `transformFunctionDeclaration` which params to flag as UDT instances
+    // (scope-locally) when entering the function body.
+    walk.simple(ast, {
+        ExpressionStatement(node: any) {
+            const expr = node.expression;
+            if (!expr || expr.type !== 'AssignmentExpression' || expr.operator !== '=') return;
+            const left = expr.left;
+            if (left?.type !== 'MemberExpression' ||
+                left.computed ||
+                left.property?.type !== 'Identifier' ||
+                left.property.name !== '__pineParamTypes__' ||
+                left.object?.type !== 'Identifier') return;
+            if (expr.right?.type !== 'ObjectExpression') return;
+            // Methods carry a `$M_` JS-name prefix; strip it so the registry
+            // is keyed by the Pine name `transformFunctionDeclaration` will
+            // look up at call time.
+            const rawName = left.object.name;
+            const funcName = rawName.startsWith('$M_') ? rawName.slice(3) : rawName;
+            const paramTypes: Record<string, string> = {};
+            for (const prop of expr.right.properties) {
+                if (prop.type !== 'Property') continue;
+                // Codegen emits JSON-quoted keys (`"b"`) which acorn parses as
+                // `Literal`; tolerate `Identifier` too in case the marker shape
+                // ever changes.
+                let paramName: string | undefined;
+                if (prop.key?.type === 'Identifier') paramName = prop.key.name;
+                else if (prop.key?.type === 'Literal' && typeof prop.key.value === 'string') paramName = prop.key.value;
+                if (!paramName) continue;
+                if (prop.value?.type !== 'Literal' || typeof prop.value.value !== 'string') continue;
+                // varType may include qualifiers like 'series BAR' — the type
+                // name is the last whitespace-delimited token.
+                const typeName = prop.value.value.split(/\s+/).pop()!;
+                if (scopeManager.isUdtTypeName(typeName)) {
+                    paramTypes[paramName] = typeName;
+                }
+            }
+            if (Object.keys(paramTypes).length > 0) {
+                scopeManager.setFunctionParamUdtTypes(funcName, paramTypes);
+            }
+        },
+    });
+}
+
+/**
+ * Collect every ReturnStatement.argument inside a function body, but do NOT
+ * descend into nested function declarations (those have their own returns).
+ */
+function collectReturnArguments(body: any): any[] {
+    const out: any[] = [];
+    if (!body) return out;
+    function visit(node: any) {
+        if (!node || typeof node !== 'object') return;
+        // Don't descend into nested function bodies.
+        if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') {
+            return;
+        }
+        if (node.type === 'ReturnStatement' && node.argument) {
+            out.push(node.argument);
+            return;
+        }
+        for (const key of Object.keys(node)) {
+            if (key === 'type') continue;
+            const val = (node as any)[key];
+            if (Array.isArray(val)) val.forEach(visit);
+            else if (val && typeof val === 'object' && val.type) visit(val);
+        }
+    }
+    visit(body);
+    return out;
+}
+
+/**
+ * Inspect an initializer expression and return the UDT type name if it
+ * unambiguously resolves to a UDT instance — otherwise undefined.
+ *
+ * Recognized shapes:
+ *   - `<UDT>.new(...)`           — direct constructor call
+ *   - `<UDT>.copy(...)`          — direct copy call
+ *   - `cond ? <UDT-init> : <UDT-init>`  — ternary where BOTH branches
+ *                                          resolve to the SAME UDT type
+ *
+ * The ternary case recurses, so nested conditionals like
+ * `c1 ? BAR.new() : (c2 ? BAR.copy(s) : BAR.new())` are also recognized.
+ *
+ * Branches that don't unambiguously produce the same UDT (different types,
+ * non-UDT calls, etc.) → undefined → variable not registered as UDT instance
+ * (safer to skip than to misclassify).
+ */
+function inferUdtTypeFromInit(init: any, scopeManager: ScopeManager): string | undefined {
+    if (!init) return undefined;
+
+    // `<UDT>.new(...)` / `<UDT>.copy(...)`
+    if (
+        init.type === 'CallExpression' &&
+        init.callee?.type === 'MemberExpression' &&
+        !init.callee.computed &&
+        init.callee.object?.type === 'Identifier' &&
+        init.callee.property?.type === 'Identifier' &&
+        (init.callee.property.name === 'new' || init.callee.property.name === 'copy') &&
+        scopeManager.isUdtTypeName(init.callee.object.name)
+    ) {
+        return init.callee.object.name;
+    }
+
+    // `<userFunc>(...)` — when the function's return type has been inferred
+    // as a UDT (see Pass 1.5 in preProcessUdtRegistry).
+    if (
+        init.type === 'CallExpression' &&
+        init.callee?.type === 'Identifier'
+    ) {
+        const fnRetType = scopeManager.getFunctionReturnType(init.callee.name);
+        if (fnRetType) return fnRetType;
+    }
+
+    // Conditional / ternary: both branches must resolve to the same UDT type.
+    if (init.type === 'ConditionalExpression') {
+        const consequentType = inferUdtTypeFromInit(init.consequent, scopeManager);
+        const alternateType = inferUdtTypeFromInit(init.alternate, scopeManager);
+        if (consequentType && consequentType === alternateType) {
+            return consequentType;
+        }
+    }
+
+    return undefined;
+}
+
 export function preProcessContextBoundVars(ast: any, scopeManager: ScopeManager): void {
     walk.simple(ast, {
         VariableDeclaration(node: any) {
@@ -121,12 +422,27 @@ export function runAnalysisPass(ast: any, scopeManager: ScopeManager): string | 
             if (node.id && node.id.name) {
                 scopeManager.addReservedName(node.id.name);
                 scopeManager.addUserFunction(node.id.name);
+                // Track regular (non-method) user functions separately so
+                // UFCS-style direct calls to method-only Pine declarations
+                // (`foo(receiver, args)` where `foo` was declared as
+                // `method foo(...)`) can be retargeted to the `$M_` JS name.
+                // Methods are emitted with a `$M_` JS prefix; absence of
+                // that prefix means it's a regular function.
+                if (!node.id.name.startsWith('$M_')) {
+                    scopeManager.addRegularUserFunction(node.id.name);
+                }
             }
         },
         // Detect Pine `method` markers emitted by codegen: name.__pineMethod__ = true;
         // These mark user functions declared with the `method` keyword, which ARE
         // allowed to be called with obj.method() dot-notation.  Regular functions
         // (without `method`) must NOT be callable via dot-notation.
+        //
+        // Methods are emitted with a `$M_` prefix on their JS identifier so they
+        // never collide with a regular function of the same Pine name. The
+        // marker is on the prefixed name; we strip it to register the Pine name
+        // in `userMethods` and `userFunctions` so the call-site lookup
+        // (`obj.methodName(...)`) resolves cleanly.
         ExpressionStatement(node: any) {
             const expr = node.expression;
             if (expr && expr.type === 'AssignmentExpression' && expr.operator === '=' &&
@@ -134,7 +450,14 @@ export function runAnalysisPass(ast: any, scopeManager: ScopeManager): string | 
                 expr.left.property?.name === '__pineMethod__' &&
                 expr.left.object?.type === 'Identifier' &&
                 expr.right?.value === true) {
-                scopeManager.addUserMethod(expr.left.object.name);
+                const jsName = expr.left.object.name;
+                const pineName = jsName.startsWith('$M_') ? jsName.slice(3) : jsName;
+                scopeManager.addUserMethod(pineName);
+                // Also expose the Pine name as a "user function" so the call-site
+                // check `isUserFunction(methodName) && isUserMethod(methodName)`
+                // passes for methods that exist only in `method` form (no
+                // sibling regular function).
+                scopeManager.addUserFunction(pineName);
             }
         },
         ArrowFunctionExpression(node: any) {

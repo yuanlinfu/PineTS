@@ -92,4 +92,166 @@ plot(obj.perf, "perf")
         // Second bar: perf was 1, incremented to 2
         expect(plots['perf'].data[1].value).toBe(2);
     });
+
+    // ---- Named-args regression baseline ------------------------------------
+    // These tests cover the WORKING shapes of UDT.new() so that any future
+    // change to the named-args detection in Core.ts does not silently regress
+    // the cases that already work. The mixed-positional+named shape is not
+    // covered here on purpose — that case is broken today and is tracked
+    // separately.
+    it('all-named args fill all fields', async () => {
+        const code = `
+//@version=5
+indicator("UDT All Named")
+
+type mytype
+    float perf = 0
+    int trend = 0
+
+obj = mytype.new(perf = 42.5, trend = 7)
+plot(obj.perf, "perf")
+plot(obj.trend, "trend")
+`;
+        const { plots } = await pineTS.run(code);
+        expect(plots['perf'].data[0].value).toBe(42.5);
+        expect(plots['trend'].data[0].value).toBe(7);
+    });
+
+    it('all-named args in non-declaration order fill correctly', async () => {
+        const code = `
+//@version=5
+indicator("UDT Named Reordered")
+
+type mytype
+    float perf = 0
+    int trend = 0
+    bool active = false
+
+// Names in reverse order vs the type declaration
+obj = mytype.new(active = true, trend = 5, perf = 1.5)
+plot(obj.perf, "perf")
+plot(obj.trend, "trend")
+plot(obj.active ? 1 : 0, "active")
+`;
+        const { plots } = await pineTS.run(code);
+        expect(plots['perf'].data[0].value).toBe(1.5);
+        expect(plots['trend'].data[0].value).toBe(5);
+        expect(plots['active'].data[0].value).toBe(1);
+    });
+
+    it('partial named args fall back to defaults', async () => {
+        const code = `
+//@version=5
+indicator("UDT Partial Named")
+
+type mytype
+    float perf = 9.9
+    int trend = 3
+    bool active = true
+
+// Override only one field — the others should keep their declared defaults
+obj = mytype.new(perf = 1.0)
+plot(obj.perf, "perf")
+plot(obj.trend, "trend")
+plot(obj.active ? 1 : 0, "active")
+`;
+        const { plots } = await pineTS.run(code);
+        expect(plots['perf'].data[0].value).toBe(1.0);
+        expect(plots['trend'].data[0].value).toBe(3);
+        expect(plots['active'].data[0].value).toBe(1);
+    });
+
+    it('all-positional args (existing behavior baseline)', async () => {
+        const code = `
+//@version=5
+indicator("UDT All Positional")
+
+type mytype
+    float perf = 0
+    int trend = 0
+    bool active = false
+
+obj = mytype.new(2.5, 8, true)
+plot(obj.perf, "perf")
+plot(obj.trend, "trend")
+plot(obj.active ? 1 : 0, "active")
+`;
+        const { plots } = await pineTS.run(code);
+        expect(plots['perf'].data[0].value).toBe(2.5);
+        expect(plots['trend'].data[0].value).toBe(8);
+        expect(plots['active'].data[0].value).toBe(1);
+    });
+
+    it('mixed positional + named args (Range-Average-Retest pattern)', async () => {
+        // This is the exact shape that motivated the fix:
+        //   trade.new(p1, p2, ..., tradeColor = ..., dir = -1)
+        // Two positional args, then one or more named args. The trailing
+        // named-args object must NOT be assigned to the third field — it
+        // should be split out and applied by name.
+        const code = `
+//@version=5
+indicator("UDT Mixed Positional Named")
+
+type mytype
+    float perf = 0
+    int trend = 0
+    bool active = false
+    int dir
+
+obj = mytype.new(2.5, 8, dir = -1)
+plot(obj.perf, "perf")
+plot(obj.trend, "trend")
+plot(obj.active ? 1 : 0, "active")
+plot(obj.dir, "dir")
+`;
+        const { plots } = await pineTS.run(code);
+        expect(plots['perf'].data[0].value).toBe(2.5);
+        expect(plots['trend'].data[0].value).toBe(8);
+        // active was skipped — falls back to declared default `false`
+        expect(plots['active'].data[0].value).toBe(0);
+        // dir was passed as a named arg AFTER positionals — must be -1, not undefined
+        expect(plots['dir'].data[0].value).toBe(-1);
+    });
+
+    it('mixed positional + multiple named args', async () => {
+        // 8 positional + 2 named args (the actual shape from
+        // Range-Average-Retest's trade.new call).
+        const code = `
+//@version=5
+indicator("UDT Mixed 8+2")
+
+type trade
+    float entry
+    float top
+    float bottom
+    int   topColor
+    int   bottomColor
+    int   startTime
+    int   endTime
+    int   startLineTime
+    int   tradeColor
+    bool  openTrade = true
+    int   dir
+
+t = trade.new(100.0, 110.0, 90.0, 1, 2, 1000, 1000, 500, tradeColor = 99, dir = -1)
+plot(t.entry, "entry")
+plot(t.top, "top")
+plot(t.bottom, "bottom")
+plot(t.startLineTime, "startLineTime")
+plot(t.tradeColor, "tradeColor")
+plot(t.openTrade ? 1 : 0, "openTrade")
+plot(t.dir, "dir")
+`;
+        const { plots } = await pineTS.run(code);
+        expect(plots['entry'].data[0].value).toBe(100);
+        expect(plots['top'].data[0].value).toBe(110);
+        expect(plots['bottom'].data[0].value).toBe(90);
+        expect(plots['startLineTime'].data[0].value).toBe(500);
+        // tradeColor must be the named value 99, NOT a {tradeColor:..., dir:...} object
+        expect(plots['tradeColor'].data[0].value).toBe(99);
+        // openTrade was skipped — falls back to declared default `true`
+        expect(plots['openTrade'].data[0].value).toBe(1);
+        // dir must be -1
+        expect(plots['dir'].data[0].value).toBe(-1);
+    });
 });

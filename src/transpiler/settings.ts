@@ -3,12 +3,21 @@ export const KNOWN_NAMESPACES = ['ta', 'math', 'request', 'array', 'input', 'col
 
 // This is used to transform ns() calls to ns.any() calls
 // Entries with a __value property also support dual-use as variables (e.g. time, na)
+//
+// Pine v6 type-cast pattern: `<TypeName>(value)` — most commonly `box(na)`,
+// `line(na)` etc. inside UDT initializers — needs the namespace to be listed
+// here so the call gets rewritten to `<TypeName>.any(value)` (each helper's
+// `any` delegates to `new`, producing a typed-na/passthrough value).
 export const NAMESPACES_LIKE = [
     'hline',
     'plot',
     'fill',
     'label',
     'line',
+    'box',
+    'linefill',
+    'polyline',
+    'table',
     'na',
     'alert',
     'time',
@@ -54,6 +63,24 @@ export const NAMESPACE_COLLISION_NAMES = new Set([
     'size', 'extend', 'display', 'format', 'location', 'shape', 'text', 'xloc', 'yloc',
     'linefill', 'polyline', 'box', 'table', 'map', 'matrix', 'chart',
     'alert', 'barstate', 'syminfo', 'timeframe', 'strategy', 'log', 'str',
+]);
+
+// JavaScript reserved keywords that ARE valid Pine identifiers but invalid as
+// JS identifiers. When a user names a function/method/variable using one of
+// these, we must rename it during codegen — otherwise the generated JS fails
+// to parse (e.g. `function delete() {}` → `Unexpected keyword 'delete'`).
+//
+// Excludes words reserved in BOTH languages (break, case, class, const, continue,
+// do, else, enum, export, for, if, import, in, return, switch, try, var, while)
+// — those can't be Pine identifiers in the first place.
+//
+// Excludes `this` — special-cased elsewhere as the implicit first parameter
+// of Pine `method` declarations.
+export const JS_RESERVED_WORDS = new Set([
+    'await', 'debugger', 'default', 'delete', 'extends', 'finally',
+    'function', 'implements', 'instanceof', 'interface', 'let', 'new',
+    'package', 'private', 'protected', 'public', 'static', 'super',
+    'throw', 'typeof', 'void', 'with', 'yield',
 ]);
 
 // All known data variables in the context

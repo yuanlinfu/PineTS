@@ -81,7 +81,13 @@ export class NAHelper {
     }
 
     any(series: any) {
+        // Pine Script function defaults like `param = na` get transpiled to JS
+        // `param = na`, where `na` is this NAHelper instance. When the caller
+        // omits the argument, the parameter ends up holding the helper itself
+        // — which must be recognised as NA, not as a regular object.
+        if (series instanceof NAHelper) return true;
         const val = Series.from(series).get(0);
+        if (val instanceof NAHelper) return true;
         // null/undefined are always na
         if (val === null || val === undefined) return true;
         // For numbers, check NaN (Pine Script na for numeric types)
@@ -191,7 +197,15 @@ export class Core {
         return _options;
     }
     indicator(...args) {
-        const options = parseIndicatorOptions(args);
+        // The transpiler wraps every positional arg with `$.param(...)`, which
+        // promotes booleans / numbers to a `Series` instance (strings and
+        // objects pass through as-is). Multi-signature matching in
+        // `parseArgsForPineParams` then fails the `boolean` / `number` type
+        // checks because a Series is neither — so `overlay=true`,
+        // `precision=N`, etc. silently drop back to defaults. Unwrap any
+        // Series here to expose the underlying scalar.
+        const unwrapped = args.map(a => a instanceof Series ? a.get(0) : a);
+        const options = parseIndicatorOptions(unwrapped);
 
         const defaults = {
             title: '',
@@ -494,23 +508,28 @@ export class Core {
                 // Map positional args to field names, applying defaults for missing args
                 const mappedArgs: Record<string, any> = {};
 
-                // Detect named args object: if the first (and only) argument is a plain
-                // object whose keys match field names, treat it as named arguments.
-                // This handles the Pine pattern: MyType.new(field1 = val1, field2 = val2)
-                // which the transpiler converts to: MyType.new({ field1: val1, field2: val2 })
+                // Detect a trailing named-args object. The transpiler turns
+                //   MyType.new(p1, p2, named1 = v1, named2 = v2)
+                // into
+                //   MyType.new(p1, p2, { named1: v1, named2: v2 })
+                // The named-args object is always the LAST positional, so check
+                // args[args.length - 1] — not args[0]. Pure-named calls (length 1)
+                // and mixed positional+named calls are both handled by this rule.
                 let namedArgs: Record<string, any> | null = null;
-                if (
-                    args.length === 1 &&
-                    args[0] &&
-                    typeof args[0] === 'object' &&
-                    !(args[0] instanceof Series) &&
-                    !Array.isArray(args[0]) &&
-                    !(args[0] instanceof PineTypeObject)
-                ) {
-                    const keys = Object.keys(args[0]);
-                    if (keys.length > 0 && keys.some((k) => definitionKeys.includes(k))) {
-                        namedArgs = args[0];
-                        args = []; // Clear positional args
+                if (args.length > 0) {
+                    const last = args[args.length - 1];
+                    if (
+                        last &&
+                        typeof last === 'object' &&
+                        !(last instanceof Series) &&
+                        !Array.isArray(last) &&
+                        !(last instanceof PineTypeObject)
+                    ) {
+                        const keys = Object.keys(last);
+                        if (keys.length > 0 && keys.some((k) => definitionKeys.includes(k))) {
+                            namedArgs = last;
+                            args = args.slice(0, -1);
+                        }
                     }
                 }
 

@@ -32,7 +32,7 @@ export class PolylineHelper {
         const time = this.context.marketData[0]?.openTime || 0;
         this.context.plots['__polylines__'].data = [{
             time,
-            value: this._polylines.map(pl => pl.toPlotData()),
+            value: this._polylines.filter(pl => !pl._deleted).map(pl => pl.toPlotData()),
             options: { style: 'drawing_polyline' },
         }];
     }
@@ -54,11 +54,13 @@ export class PolylineHelper {
     }
 
     /**
-     * Resolve a color value, preserving NaN (na = no color) instead of
-     * letting it fall through to a default via the || operator.
+     * Resolve a color value, preserving na markers (NaN from `na`, null from
+     * `color(na)`) so renderers can detect "no color" instead of forcing a
+     * default via the `||` operator.
      */
     private _resolveColor(val: any, fallback: string): any {
         const resolved = this._resolve(val);
+        if (resolved === null || resolved === undefined) return resolved;
         if (typeof resolved === 'number' && isNaN(resolved)) return NaN;
         return resolved || fallback;
     }
@@ -174,7 +176,21 @@ export class PolylineHelper {
     }
 
     // polyline() direct call — mapped via NAMESPACES_LIKE → polyline.any()
-    any(...args: any[]): PolylineObject {
+    // Pine `polyline(arg)` is a type cast / typed-na, NOT a constructor.
+    any(...args: any[]): PolylineObject | null {
+        if (args.length === 1) {
+            const arg = args[0];
+            if (arg === null || arg === undefined) return null;
+            if (arg instanceof NAHelper) return null;
+            if (typeof arg === 'number' && isNaN(arg)) return null;
+            if (arg instanceof PolylineObject) return arg;
+            if (arg instanceof Series) {
+                const v = arg.get(0);
+                if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return null;
+                if (v instanceof PolylineObject) return v;
+            }
+            return null;
+        }
         return this.new(...args);
     }
 
