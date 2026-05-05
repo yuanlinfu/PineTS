@@ -736,6 +736,37 @@ export class Context {
         }
     }
 
+    /**
+     * Resolve an iterable for `for x in collection` codegen.
+     * Handles PineArrayObject (unwrap to inner JS array) and plain JS arrays uniformly.
+     * Returns the value itself if it's already iterable (Map, Set, etc.).
+     *
+     * Centralizing this here means the transpiler can emit a uniform shape regardless of
+     * whether the iterable is a built-in returning a plain array (e.g. box.all) or a UDT
+     * field holding a PineArrayObject — and future collection types only need to update
+     * this helper, not the codegen.
+     */
+    iter(source: any): any {
+        if (source == null) return [];
+        // PineArrayObject wraps the underlying JS array as `.array`
+        if (Array.isArray(source.array)) return source.array;
+        return source;
+    }
+
+    /**
+     * Resolve an iterable yielding [index, value] tuples for `for [i, x] in collection`
+     * destructuring codegen. PineArrayObject's [Symbol.iterator] yields scalar values, so
+     * we must explicitly call `.entries()` on the underlying array.
+     */
+    entries(source: any): IterableIterator<[number, any]> {
+        if (source == null) return [].entries();
+        if (Array.isArray(source.array)) return source.array.entries();
+        if (Array.isArray(source)) return source.entries();
+        // Map / Set / other iterables that already yield tuples
+        if (typeof source.entries === 'function') return source.entries();
+        return [].entries();
+    }
+
     //#region [Call Stack Management] ===========================
 
     private _callStack: string[] = [];

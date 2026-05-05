@@ -4,6 +4,61 @@ import { PineTS } from '../../../PineTS.class';
 import { Series } from '../../../Series';
 import { TIMEFRAMES, normalizeTimeframe } from '../utils/TIMEFRAMES';
 import { PineArrayObject, PineArrayType } from '../../array/PineArrayObject';
+import { parseArgsForPineParams } from '../../utils';
+
+// Pine signature (v5/v6):
+//   request.security_lower_tf(symbol, timeframe, expression, ignore_invalid_symbol, currency, ignore_invalid_timeframe, calc_bars_count)
+// Note: no `gaps`/`lookahead` for security_lower_tf — different surface than security.
+const SECURITY_LOWER_TF_SIGNATURES = [
+    ['symbol', 'timeframe', 'expression'],
+    ['symbol', 'timeframe', 'expression', 'ignore_invalid_symbol'],
+    ['symbol', 'timeframe', 'expression', 'ignore_invalid_symbol', 'currency'],
+    ['symbol', 'timeframe', 'expression', 'ignore_invalid_symbol', 'currency', 'ignore_invalid_timeframe'],
+    ['symbol', 'timeframe', 'expression', 'ignore_invalid_symbol', 'currency', 'ignore_invalid_timeframe', 'calc_bars_count'],
+];
+const SECURITY_LOWER_TF_TYPES = {
+    symbol: 'series',
+    timeframe: 'series',
+    expression: 'any',
+    ignore_invalid_symbol: 'series',
+    currency: 'series',
+    ignore_invalid_timeframe: 'series',
+    calc_bars_count: 'series',
+};
+
+function isParamTuple(v: any): v is [any, string] {
+    return Array.isArray(v) && v.length === 2 && typeof v[1] === 'string';
+}
+
+function unwrapParamTuples(rawArgs: any[], outNames: (string | undefined)[]): any[] {
+    return rawArgs.map((a) => {
+        if (isParamTuple(a)) {
+            outNames.push(a[1]);
+            return a[0];
+        }
+        outNames.push(undefined);
+        return a;
+    });
+}
+
+function resolveSlotValue(v: any): any {
+    return isParamTuple(v) ? v[0] : v;
+}
+
+function resolveSlotName(
+    slotName: string,
+    signatures: string[][],
+    argNames: (string | undefined)[],
+    parsedSlot: any,
+): string | undefined {
+    const fullSig = signatures[signatures.length - 1];
+    const idx = fullSig.indexOf(slotName);
+    if (idx >= 0 && idx < argNames.length && argNames[idx] !== undefined) {
+        return argNames[idx];
+    }
+    if (isParamTuple(parsedSlot)) return parsedSlot[1];
+    return undefined;
+}
 
 /**
  * Detect the PineArrayType from a runtime value.
@@ -24,27 +79,32 @@ function detectArrayType(value: any): PineArrayType {
  * @returns
  */
 export function security_lower_tf(context: any) {
-    return async (
-        symbol: any,
-        timeframe: any,
-        expression: any,
-        ignore_invalid_symbol: boolean | any[] = false,
-        currency: any = null,
-        ignore_invalid_timeframe: boolean | any[] = false,
-        calc_bars_count: number | any[] = 0
-    ) => {
-        const rawSymbol = symbol[0] instanceof Series ? (symbol[0] as Series).get(0) : symbol[0];
+    return async (...rawArgs: any[]) => {
+        // Same Pine named-args resolution as request.security — bind by name to the
+        // documented signature, with the trailing options bag merged into named slots.
+        const argNames: (string | undefined)[] = [];
+        const args = unwrapParamTuples(rawArgs, argNames);
+        const parsed = parseArgsForPineParams<any>(args, SECURITY_LOWER_TF_SIGNATURES, SECURITY_LOWER_TF_TYPES);
+
+        const symbolSlot = resolveSlotValue(parsed.symbol);
+        const timeframeSlot = resolveSlotValue(parsed.timeframe);
+        const expressionSlot = resolveSlotValue(parsed.expression);
+
+        const rawSymbol = symbolSlot instanceof Series ? symbolSlot.get(0) : symbolSlot;
         // Empty string "" means "use chart's symbol" (Pine Script spec)
         const resolvedSymbol = rawSymbol === '' ? context.tickerId : rawSymbol;
         const _symbol = typeof resolvedSymbol === 'string' && resolvedSymbol.includes(':') ? resolvedSymbol.split(':')[1] : resolvedSymbol;
-        const rawTimeframe = timeframe[0] instanceof Series ? (timeframe[0] as Series).get(0) : timeframe[0];
+        const rawTimeframe = timeframeSlot instanceof Series ? timeframeSlot.get(0) : timeframeSlot;
         // Empty string "" means "use chart's timeframe" (Pine Script spec)
         const _timeframe = rawTimeframe === '' ? context.timeframe : (typeof rawTimeframe === 'string' ? rawTimeframe : String(rawTimeframe ?? ''));
-        const _expression = expression[0];
-        const _expression_name = expression[1];
-        const _ignore_invalid_symbol = Array.isArray(ignore_invalid_symbol) ? ignore_invalid_symbol[0] : ignore_invalid_symbol;
-        const _ignore_invalid_timeframe = Array.isArray(ignore_invalid_timeframe) ? ignore_invalid_timeframe[0] : ignore_invalid_timeframe;
-        // const _calc_bars_count = Array.isArray(calc_bars_count) ? calc_bars_count[0] : calc_bars_count;
+        const _expression = expressionSlot;
+        const _expression_name = resolveSlotName('expression', SECURITY_LOWER_TF_SIGNATURES, argNames, parsed.expression);
+        const _ignore_invalid_symbol = resolveSlotValue(parsed.ignore_invalid_symbol);
+        const _ignore_invalid_timeframe = resolveSlotValue(parsed.ignore_invalid_timeframe);
+        const _calc_bars_count = (() => {
+            const v = resolveSlotValue(parsed.calc_bars_count);
+            return typeof v === 'number' && v > 0 ? v : undefined;
+        })();
 
         // CRITICAL: Prevent infinite recursion in secondary contexts
         // Still wrap in PineArrayObject so array.size() etc. work in the secondary script
@@ -95,15 +155,15 @@ export function security_lower_tf(context: any) {
                 || (context.marketData?.length > 0 ? context.marketData[0].openTime : undefined);
             const adjustedSDate = effectiveSDate ? effectiveSDate - buffer : undefined;
 
-            // Determine end date: cover last bar's intrabars without overshooting
+            // Align secondary's end date with the chart's actual data so that
+            // `barstate.islast` in the secondary fires at the same temporal point as
+            // the chart's `barstate.islast`. See security.ts for full rationale.
             const lastBarCloseTime = context.marketData?.length > 0
                 ? context.marketData[context.marketData.length - 1].closeTime
                 : 0;
-            const secEDate = context.eDate
-                ? Math.max(context.eDate, lastBarCloseTime)
-                : (lastBarCloseTime || Date.now()) + buffer;
+            const secEDate = lastBarCloseTime || context.eDate || Date.now();
 
-            const pineTS = new PineTS(context.source, _symbol, _timeframe, undefined, adjustedSDate, secEDate);
+            const pineTS = new PineTS(context.source, _symbol, _timeframe, _calc_bars_count, adjustedSDate, secEDate);
             pineTS.markAsSecondary();
 
             const secContext = await pineTS.run(context.pineTSCode);

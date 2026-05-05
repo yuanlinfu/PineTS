@@ -169,4 +169,50 @@ describe('Str Namespace', () => {
         expect(last(result.fmt_no_args)).toBe('hello'); // replace won't find placeholders
         expect(last(result.nan_num)).toBeNaN();
     });
+
+    it('should format timestamps via str.format_time', async () => {
+        const sDate = new Date('2019-01-01').getTime();
+        const eDate = new Date('2019-01-02').getTime();
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', null, sDate, eDate);
+
+        const sourceCode = (context: any) => {
+            const { str } = context.pine;
+
+            // Fixed UNIX ms timestamp: 2024-03-19 (Tuesday) 14:05:09 UTC.
+            // Inlined as a literal because the source is re-transpiled and locals
+            // aren't visible in the wrapper Function scope.
+            return {
+                date_only:  str.format_time(1710857109000, 'yyyy-MM-dd', 'UTC'),
+                dow_short:  str.format_time(1710857109000, "EEE (yyyy-MM-dd)", 'UTC'),
+                dow_long:   str.format_time(1710857109000, 'EEEE', 'UTC'),
+                month_long: str.format_time(1710857109000, 'MMMM d, yyyy', 'UTC'),
+                month_short:str.format_time(1710857109000, 'MMM d', 'UTC'),
+                time_24:    str.format_time(1710857109000, 'HH:mm:ss', 'UTC'),
+                time_12:    str.format_time(1710857109000, 'h:mm a', 'UTC'),
+                year_2:     str.format_time(1710857109000, 'yy', 'UTC'),
+                escaped:    str.format_time(1710857109000, "yyyy'T'HH:mm", 'UTC'),
+                tz_offset:  str.format_time(1710857109000, 'Z', 'UTC'),
+                tz_ny:      str.format_time(1710857109000, 'yyyy-MM-dd HH:mm Z', 'America/New_York'),
+                nan_input:  str.format_time(NaN, 'yyyy', 'UTC'),
+            };
+        };
+
+        const { result } = await pineTS.run(sourceCode);
+        const last = (arr: any[]) => arr[arr.length - 1];
+
+        expect(last(result.date_only)).toBe('2024-03-19');
+        expect(last(result.dow_short)).toBe('Tue (2024-03-19)');
+        expect(last(result.dow_long)).toBe('Tuesday');
+        expect(last(result.month_long)).toBe('March 19, 2024');
+        expect(last(result.month_short)).toBe('Mar 19');
+        expect(last(result.time_24)).toBe('14:05:09');
+        expect(last(result.time_12)).toBe('2:05 PM');
+        expect(last(result.year_2)).toBe('24');
+        // 'T' inside single quotes is a literal — must NOT be substituted
+        expect(last(result.escaped)).toBe('2024T14:05');
+        expect(last(result.tz_offset)).toBe('+0000');
+        // NY in March is on DST (EDT, UTC-04:00) → 14:05 UTC = 10:05 local
+        expect(last(result.tz_ny)).toBe('2024-03-19 10:05 -0400');
+        expect(last(result.nan_input)).toBe('NaN');
+    });
 });

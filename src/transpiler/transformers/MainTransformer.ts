@@ -322,47 +322,47 @@ export function runTransformationPass(
                     });
                 }
             }
-            // Transform the right (iterable expression) - build $.get(scopedRef, 0).array
-            if (node.right && node.right.type === 'Identifier') {
-                // transformIdentifier may already wrap user variables in $.get($.var.X, 0).
-                // addArrayAccess reads the (stale) node.name and overwrites the result.
-                // Fix: call transformIdentifier, then only call addArrayAccess if the node
-                // wasn't already transformed (i.e. it's still an Identifier).
-                transformIdentifier(node.right, state);
+            // Transform the right (iterable expression) and wrap it with a runtime helper that
+            // resolves Pine collection iteration uniformly:
+            //   for x in coll       → for (const x of $.iter(coll))
+            //   for [i, x] in coll  → for (const [i, x] of $.entries(coll))
+            // $.iter / $.entries handle PineArrayObject (.array unwrap), plain JS arrays
+            // (built-ins like box.all), and pass-through for already-iterable values.
+            // Centralizing the resolution avoids special-casing the codegen for each iterable
+            // shape and removes the static-typing guesswork.
+            if (node.right) {
                 if (node.right.type === 'Identifier') {
-                    // transformIdentifier didn't rename this (context-bound / built-in var)
-                    addArrayAccess(node.right, state);
+                    // transformIdentifier may already wrap user variables in $.get($.var.X, 0).
+                    // addArrayAccess reads the (stale) node.name and overwrites the result.
+                    // Fix: call transformIdentifier, then only call addArrayAccess if the node
+                    // wasn't already transformed (i.e. it's still an Identifier).
+                    transformIdentifier(node.right, state);
+                    if (node.right.type === 'Identifier') {
+                        // transformIdentifier didn't rename this (context-bound / built-in var)
+                        addArrayAccess(node.right, state);
+                    }
+                } else {
+                    // MemberExpression / CallExpression / etc. — recurse so nested identifiers
+                    // get transformed before we wrap the whole expression below.
+                    c(node.right, state);
                 }
 
-                // Access .array property for iteration over Pine Script arrays
-                // Build: $.get(X, 0).array
+                const isDestructuring = node.left && node.left.type === 'VariableDeclaration' &&
+                    node.left.declarations[0].id.type === 'ArrayPattern';
+                const helperName = isDestructuring ? 'entries' : 'iter';
+
+                // Build: $.<helperName>(<currentRight>)
                 const currentRight = { ...node.right };
-                
-                // Create MemberExpression: currentRight.array
-                let arrayAccess = ASTFactory.createMemberExpression(
-                    currentRight,
-                    ASTFactory.createIdentifier('array'),
-                    false
+                const wrapped = ASTFactory.createCallExpression(
+                    ASTFactory.createMemberExpression(
+                        ASTFactory.createIdentifier('$'),
+                        ASTFactory.createIdentifier(helperName),
+                        false
+                    ),
+                    [currentRight]
                 );
 
-                // If destructuring, add .entries()
-                if (node.left && node.left.type === 'VariableDeclaration' && 
-                    node.left.declarations[0].id.type === 'ArrayPattern') {
-                    arrayAccess = ASTFactory.createCallExpression(
-                        ASTFactory.createMemberExpression(
-                            arrayAccess,
-                            ASTFactory.createIdentifier('entries'),
-                            false
-                        ),
-                        []
-                    );
-                }
-                
-                // Replace node.right with the new MemberExpression/CallExpression
-                Object.assign(node.right, arrayAccess);
-                
-            } else if (node.right) {
-                c(node.right, state);
+                Object.assign(node.right, wrapped);
             }
             // Inject loop guard: hoist counter declaration before the loop
             const forOfGuardName = state.getNextLoopGuardName();

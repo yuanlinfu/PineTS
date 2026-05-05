@@ -27,7 +27,7 @@ export class LinefillHelper {
     public syncToPlot() {
         this._ensurePlotsEntry();
         const time = this.context.marketData[0]?.openTime || 0;
-        const allPlotData = this._linefills.map(lf => lf.toPlotData());
+        const allPlotData = this._linefills.filter(lf => !lf._deleted).map(lf => lf.toPlotData());
 
         // Split force_overlay linefills into a separate overlay plot
         const regular = allPlotData.filter((lf: any) => !lf.force_overlay);
@@ -111,7 +111,16 @@ export class LinefillHelper {
     }
 
     // linefill() direct call — mapped via NAMESPACES_LIKE → linefill.any()
-    any(...args: any[]): LinefillObject {
+    // Pine `linefill(arg)` with a single arg is a type cast / typed-na.
+    any(...args: any[]): LinefillObject | null {
+        if (args.length === 1) {
+            const arg = args[0];
+            if (arg === null || arg === undefined) return null;
+            if (arg instanceof NAHelper) return null;
+            if (typeof arg === 'number' && isNaN(arg)) return null;
+            if (arg instanceof LinefillObject) return arg;
+            return null;
+        }
         return this.new(args[0], args[1], args[2]);
     }
 

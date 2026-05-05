@@ -21,8 +21,16 @@ const TYPE_CHECK = {
     undefined: (arg) => arg === undefined,
     null: (arg) => arg === null,
     NaN: (arg) => isNaN(arg),
+    // Permissive type: matches any value. Use sparingly — for slots like
+    // request.security's `expression` that legitimately accept anything
+    // (primitives, tuples, objects, Series, ...).
+    any: () => true,
 
-    remaining_options: (arg) => arg !== null && typeof arg === 'object' && !(arg instanceof Series) && !(arg instanceof ChartPointObject) && !isPlot(arg),
+    // Named-args bags emitted by the transpiler are always plain `{key: val}`
+    // objects — never arrays. Excluding arrays here lets functions like
+    // request.security accept tuple expressions (e.g. `[o, c]`) as a positional
+    // arg without misinterpreting them as the options bag.
+    remaining_options: (arg) => arg !== null && typeof arg === 'object' && !Array.isArray(arg) && !(arg instanceof Series) && !(arg instanceof ChartPointObject) && !isPlot(arg),
 };
 
 export type PineTypeMap<T> = {

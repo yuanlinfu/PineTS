@@ -1157,6 +1157,23 @@ export function transformReturnStatement(node: any, scopeManager: ScopeManager):
             ) {
                 transformIdentifier(node.argument.object, scopeManager);
             }
+            // UDT-field subscript on a function parameter: `return b.field[N]`
+            // where `b` is a UDT-typed parameter. The chain's leaf must be a
+            // registered UDT instance for the rewrite to fire — see
+            // `transformFunctionDeclaration` for scope-local registration.
+            else if (
+                node.argument.computed &&
+                node.argument.object.type === 'MemberExpression'
+            ) {
+                let cursor: any = node.argument.object;
+                while (cursor.object && cursor.object.type === 'MemberExpression') {
+                    cursor = cursor.object;
+                }
+                if (cursor.object?.type === 'Identifier' &&
+                    scopeManager.isUdtInstance(cursor.object.name)) {
+                    transformMemberExpression(node.argument, '', scopeManager);
+                }
+            }
         }
 
         if (curScope === 'fn') {
@@ -1320,7 +1337,7 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
         node.body.body.unshift(callIdDecl);
 
         scopeManager.pushScope('fn');
-        
+
         // Register function parameters as local series variables
         // This ensures they:
         // 1. Stay as plain identifiers (no renaming to $.let.scoped_name)
@@ -1330,17 +1347,48 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
                 scopeManager.addLocalSeriesVar(param.name);
             }
         });
-        
+
+        // Scope-locally register any UDT-typed parameters (per
+        // `funcName.__pineParamTypes__` markers populated by AnalysisPass)
+        // so the use-site rewrite for `b.field[N]` fires inside the body.
+        // The names get unmarked when leaving function scope below.
+        // Methods carry a `$M_` JS-name prefix that's not used in the registry
+        // (which is keyed by the Pine name) — strip it before lookup.
+        const rawFnName = node.id?.name as string | undefined;
+        const fnName = rawFnName?.startsWith('$M_') ? rawFnName.slice(3) : rawFnName;
+        const paramTypes = fnName ? scopeManager.getFunctionParamUdtTypes(fnName) : undefined;
+        // Snapshot prior bindings for parameter names that shadow outer-scope
+        // UDT instances (e.g. `method touch(ZZ aZZ)` where `aZZ` is also a
+        // global UDT variable). Without this, the unmark on function exit
+        // would wipe the outer registration too, breaking later `aZZ.foo()`
+        // dispatches at the call site.
+        const savedUdtBindings: Record<string, string | undefined> = {};
+        if (paramTypes) {
+            for (const [paramName, typeName] of Object.entries(paramTypes)) {
+                savedUdtBindings[paramName] = scopeManager.getVariableUdtType(paramName);
+                scopeManager.markVariableAsUdtInstance(paramName, typeName);
+            }
+        }
+
         // Just delegate to the callback to continue the recursion
         c(node.body, scopeManager);
-        
+
         // Clean up: remove function parameters from local series vars after exiting function scope
         node.params.forEach((param: any) => {
             if (param.type === 'Identifier') {
                 scopeManager.removeLocalSeriesVar(param.name);
             }
         });
-        
+        if (paramTypes) {
+            for (const paramName of Object.keys(paramTypes)) {
+                scopeManager.unmarkVariableAsUdtInstance(paramName);
+                const prev = savedUdtBindings[paramName];
+                if (prev !== undefined) {
+                    scopeManager.markVariableAsUdtInstance(paramName, prev);
+                }
+            }
+        }
+
         scopeManager.popScope();
     }
 }

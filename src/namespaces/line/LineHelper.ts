@@ -42,7 +42,7 @@ export class LineHelper {
     public syncToPlot() {
         this._ensurePlotsEntry();
         const time = this.context.marketData[0]?.openTime || 0;
-        const allPlotData = this._lines.map(ln => ln.toPlotData());
+        const allPlotData = this._lines.filter(ln => !ln._deleted).map(ln => ln.toPlotData());
 
         // Split force_overlay objects into a separate overlay plot (renders on main chart pane)
         const regular = allPlotData.filter((l: any) => !l.force_overlay);
@@ -183,7 +183,21 @@ export class LineHelper {
     }
 
     // line() direct call — mapped via NAMESPACES_LIKE → line.any()
-    any(...args: any[]): LineObject {
+    // Pine `line(arg)` is a type cast / typed-na, NOT a constructor.
+    any(...args: any[]): LineObject | null {
+        if (args.length === 1) {
+            const arg = args[0];
+            if (arg === null || arg === undefined) return null;
+            if (arg instanceof NAHelper) return null;
+            if (typeof arg === 'number' && isNaN(arg)) return null;
+            if (arg instanceof LineObject) return arg;
+            if (arg instanceof Series) {
+                const v = arg.get(0);
+                if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return null;
+                if (v instanceof LineObject) return v;
+            }
+            return null;
+        }
         return this.new(...args);
     }
 

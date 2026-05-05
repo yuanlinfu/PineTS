@@ -27,7 +27,7 @@ export class TableHelper {
         const time = this.context.marketData[0]?.openTime || 0;
         this.context.plots['__tables__'].data = [{
             time,
-            value: this._tables.map(tbl => tbl.toPlotData()),
+            value: this._tables.filter(tbl => !tbl._deleted).map(tbl => tbl.toPlotData()),
             options: { style: 'table' },
         }];
     }
@@ -110,7 +110,16 @@ export class TableHelper {
         return tbl;
     }
 
-    any(...args: any[]): TableObject {
+    // Pine `table(arg)` is a type cast / typed-na, NOT a constructor.
+    any(...args: any[]): TableObject | null {
+        if (args.length === 1) {
+            const arg = args[0];
+            if (arg === null || arg === undefined) return null;
+            if (typeof arg === 'object' && '__value' in arg) return null;  // NAHelper-like
+            if (typeof arg === 'number' && isNaN(arg)) return null;
+            if (arg instanceof TableObject) return arg;
+            return null;
+        }
         return this.new(...args);
     }
 

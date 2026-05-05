@@ -41,6 +41,12 @@ export class Parser {
     private tokens: Token[];
     private pos: number;
     private functionNames: Set<string> = new Set();
+    // Stack of parameter-name sets for currently-being-parsed function bodies.
+    // When the body of fn `f(x, y) =>` is being parsed, the top frame is {x, y}.
+    // Used to suppress the `name → name_var` rewrite for identifiers that are
+    // really parameters of the enclosing function and just happen to share a
+    // name with some other user function.
+    private paramScopes: Set<string>[] = [];
     // When true, peekOperatorEx does NOT cross NEWLINE boundaries at all.
     // Used inside single-line switch case bodies to prevent binary operator
     // continuation from absorbing the next case's negative test value.
@@ -53,6 +59,16 @@ export class Parser {
     // Utility methods
     peek(offset = 0) {
         return this.tokens[this.pos + offset] || this.tokens[this.tokens.length - 1];
+    }
+
+    // True if `name` is a parameter of any function whose body we're currently
+    // parsing. Used to suppress the global `name → name_var` rewrite for
+    // parameters that just happen to share a name with a user function.
+    private isCurrentFunctionParam(name: string): boolean {
+        for (const frame of this.paramScopes) {
+            if (frame.has(name)) return true;
+        }
+        return false;
     }
 
     advance() {
@@ -75,6 +91,29 @@ export class Parser {
             throw new Error(`Expected '${value}' but got '${token.value}' at ${token.line}:${token.column}`);
         }
         return this.advance();
+    }
+
+    // Pine v5/v6 contextual keywords — reserved only in their declaration-introducing
+    // position (e.g. `type Foo`, `method bar(...)`, `enum E`), but valid as identifiers
+    // anywhere else (e.g. as a UDT field name, function parameter, variable).
+    private static readonly CONTEXTUAL_KEYWORDS = new Set([
+        'type', 'method', 'enum',
+    ]);
+
+    /**
+     * Consume an identifier OR a contextual keyword used as an identifier.
+     * Used in positions where Pine permits soft keywords as names — most notably
+     * UDT field names like `int type = 0`.
+     */
+    expectIdentifierOrContextual(): Token {
+        const token = this.peek();
+        if (token.type === TokenType.IDENTIFIER) {
+            return this.advance();
+        }
+        if (token.type === TokenType.KEYWORD && Parser.CONTEXTUAL_KEYWORDS.has(token.value)) {
+            return this.advance();
+        }
+        throw new Error(`Expected ${TokenType.IDENTIFIER} but got ${token.type} at ${token.line}:${token.column}`);
     }
 
     // Match a token, optionally ignoring NEWLINE and INDENT (for line continuation)
@@ -451,7 +490,9 @@ export class Parser {
 
             // Parse field: type name [= defaultValue]
             const fieldType = this.parseTypeExpression(); // Now handles generics
-            const fieldName = this.expect(TokenType.IDENTIFIER).value;
+            // Field names may be contextual keywords (e.g. `int type = 0`) — Pine
+            // treats `type`/`method`/`enum` as identifiers outside their declaration context.
+            const fieldName = this.expectIdentifierOrContextual().value;
 
             let defaultValue = null;
             if (this.match(TokenType.OPERATOR, '=')) {
@@ -706,7 +747,39 @@ export class Parser {
         const id = new Identifier(name);
         id.varType = varType;
 
-        return new VariableDeclaration([new VariableDeclarator(id, init, varType)], VariableDeclarationKind.LET);
+        const declarators = [new VariableDeclarator(id, init, varType)];
+
+        // Handle comma-separated typed declarations sharing the same type:
+        //   float a = 0.0, b = 1.0, c = 2.0
+        //   int x = 1, y = 2
+        //   array<float> p = na, q = na
+        // Each subsequent segment is `name = expr` with the leading type reapplied.
+        // The guard requires `, IDENT =` so we don't greedily swallow commas
+        // that belong to a separate full declaration on the same line, e.g.
+        //   chart.point[] a = ..., chart.point[] b = ...
+        // (`peek(2)` would be DOT/LBRACKET/IDENT, not `=`). Those flow up to
+        // the multi-statement handler in parseStatement (Layer 2).
+        while (
+            this.match(TokenType.COMMA) &&
+            this.peek(1).type === TokenType.IDENTIFIER &&
+            this.peek(2).type === TokenType.OPERATOR &&
+            this.peek(2).value === '='
+        ) {
+            this.advance(); // consume ','
+            this.skipNewlines(true);
+            let nextName = this.expect(TokenType.IDENTIFIER).value;
+            if (this.functionNames.has(nextName)) {
+                nextName = nextName + '_var';
+            }
+            this.expect(TokenType.OPERATOR, '=');
+            this.skipNewlines(true);
+            const nextInit = this.parseExpression();
+            const nextId = new Identifier(nextName);
+            nextId.varType = varType;
+            declarators.push(new VariableDeclarator(nextId, nextInit, varType));
+        }
+
+        return new VariableDeclaration(declarators, VariableDeclarationKind.LET);
     }
 
     // Parse function declaration
@@ -783,7 +856,18 @@ export class Parser {
         this.expect(TokenType.OPERATOR, '=>');
         this.skipNewlines();
 
-        const body = this.parseFunctionBody();
+        const paramFrame = new Set<string>();
+        for (const p of params) {
+            const ident = p.type === 'AssignmentPattern' ? (p as any).left : p;
+            if (ident && ident.name) paramFrame.add(ident.name);
+        }
+        this.paramScopes.push(paramFrame);
+        let body: BlockStatement;
+        try {
+            body = this.parseFunctionBody();
+        } finally {
+            this.paramScopes.pop();
+        }
         const id = new Identifier(name);
         if (returnType) id.returnType = returnType;
 
@@ -864,7 +948,18 @@ export class Parser {
         this.expect(TokenType.OPERATOR, '=>');
         this.skipNewlines();
 
-        const body = this.parseFunctionBody();
+        const paramFrame = new Set<string>();
+        for (const p of params) {
+            const ident = p.type === 'AssignmentPattern' ? (p as any).left : p;
+            if (ident && ident.name) paramFrame.add(ident.name);
+        }
+        this.paramScopes.push(paramFrame);
+        let body: BlockStatement;
+        try {
+            body = this.parseFunctionBody();
+        } finally {
+            this.paramScopes.pop();
+        }
         const id = new Identifier(name);
         if (returnType) id.returnType = returnType;
         id.isMethod = true; // Mark as method
@@ -1628,7 +1723,11 @@ export class Parser {
         if (this.match(TokenType.IDENTIFIER)) {
             const id = this.advance();
             let name = id.value;
-            if (this.functionNames.has(name) && this.peek().type !== TokenType.LPAREN) {
+            if (
+                this.functionNames.has(name) &&
+                this.peek().type !== TokenType.LPAREN &&
+                !this.isCurrentFunctionParam(name)
+            ) {
                 name = name + '_var';
             }
             return new Identifier(name);

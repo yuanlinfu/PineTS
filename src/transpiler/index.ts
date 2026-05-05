@@ -52,7 +52,7 @@ import ScopeManager from './analysis/ScopeManager';
 import { injectImplicitImports } from './transformers/InjectionTransformer';
 import { normalizeNativeImports } from './transformers/NormalizationTransformer';
 import { wrapInContextFunction } from './transformers/WrapperTransformer';
-import { transformNestedArrowFunctions, preProcessContextBoundVars, runAnalysisPass } from './analysis/AnalysisPass';
+import { transformNestedArrowFunctions, preProcessContextBoundVars, preProcessUdtRegistry, runAnalysisPass } from './analysis/AnalysisPass';
 import { runTransformationPass, transformEqualityChecks, propagateAsyncAwait } from './transformers/MainTransformer';
 import { extractPineScriptVersion, pineToJS } from './pineToJS/pineToJS.index';
 
@@ -114,6 +114,12 @@ export function transpile(source: string | Function, options: { debug: boolean; 
 
     // Pre-process: Identify context-bound variables
     preProcessContextBoundVars(ast, scopeManager);
+
+    // Pre-process: Build the UDT registry (type names + their field maps,
+    // and user variables that hold UDT instances). Enables type-aware
+    // rewrites at use sites — e.g. distinguishing Pine series-lookback
+    // (`bar.field[N]` on a UDT instance) from JS array indexing.
+    preProcessUdtRegistry(ast, scopeManager);
 
     // First pass: register all function declarations and their parameters
     // Returns the original parameter name of the root function if any

@@ -399,4 +399,64 @@ describe('LINE Namespace', () => {
         // At least 3 lines should exist (var creates on bar 0 only, let creates on every bar)
         expect(lines.length).toBeGreaterThanOrEqual(3);
     });
+
+    it('deleted lines are excluded from the __lines__ plot output', async () => {
+        // Regression: indicators that delete-and-recreate a line every bar
+        // (e.g. LuxAlgo Range Intelligence Suite refreshing the active POC line)
+        // were leaving every prior version in the rendered output. This test
+        // creates 5 lines while explicitly deleting all but the last, and
+        // asserts the published plot value contains only the surviving line.
+        const code = `
+//@version=5
+indicator("delete-then-render", overlay=true)
+var line ln = na
+if bar_index < 5
+    if not na(ln)
+        ln.delete()
+    ln := line.new(bar_index, 100, bar_index + 5, 200)
+plot(close)
+`;
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', null, new Date('2025-01-01').getTime(), new Date('2025-01-15').getTime());
+        const { plots } = await pineTS.run(code);
+
+        const lines = plots['__lines__'].data[0].value;
+        expect(Array.isArray(lines)).toBe(true);
+        // 5 lines created, 4 explicitly deleted — only 1 must remain
+        expect(lines.length).toBe(1);
+        // The surviving one is the last one (bar_index = 4)
+        expect(lines[0].x1).toBe(4);
+    });
+
+    // Regression: `line.new(..., color = na)` and `color = color(na)` must
+    // serialize a na marker so QFChart can skip stroking. The QFChart-side
+    // fallback used to paint these lines as default Pine blue (#2962ff).
+    // Mirrors the invisible anchor lines in Range-Intelligence-Suite-LuxAlgo
+    // (`line uL = line.new(..., color = na)` used as linefill endpoints).
+    it('line.new(color = na) serialises na marker (not a colour string)', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', 50, new Date('2025-01-01').getTime(), new Date('2025-03-01').getTime());
+        const { plots } = await pineTS.run(`//@version=6
+indicator("probe", overlay = true)
+if barstate.isfirst
+    line ln = line.new(0, 100, 5, 50, color = na)
+`);
+        const ln = plots['__lines__']?.data?.[0]?.value?.[0];
+        expect(ln).toBeDefined();
+        const isNa = (v: any) => v === null || v === undefined || (typeof v === 'number' && isNaN(v));
+        expect(isNa(ln.color)).toBe(true);
+        expect(ln.color).not.toBe('#2962ff');
+    });
+
+    it('line.new(color = color(na)) serialises na marker', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', 50, new Date('2025-01-01').getTime(), new Date('2025-03-01').getTime());
+        const { plots } = await pineTS.run(`//@version=6
+indicator("probe", overlay = true)
+if barstate.isfirst
+    line ln = line.new(0, 100, 5, 50, color = color(na))
+`);
+        const ln = plots['__lines__']?.data?.[0]?.value?.[0];
+        expect(ln).toBeDefined();
+        const isNa = (v: any) => v === null || v === undefined || (typeof v === 'number' && isNaN(v));
+        expect(isNa(ln.color)).toBe(true);
+        expect(ln.color).not.toBe('#2962ff');
+    });
 });

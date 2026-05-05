@@ -4,7 +4,7 @@
 // JavaScript Code Generator for PineScript AST
 // Transforms ESTree-compatible AST into JavaScript code
 
-import { CONTEXT_PINE_VARS, NAMESPACE_COLLISION_NAMES } from '../settings';
+import { CONTEXT_PINE_VARS, NAMESPACE_COLLISION_NAMES, JS_RESERVED_WORDS } from '../settings';
 
 // Set of names that conflict with Pine context variables/namespaces.
 // Function parameters with these names must be renamed to avoid Phase 2
@@ -61,22 +61,33 @@ export class CodeGenerator {
     }
 
     /**
-     * Scan the program body for variable declarations and assignments whose
-     * names collide with Pine namespace/built-in names (e.g., `fill`, `size`,
-     * `color`, `line`). Rename them with a `_$N` suffix so they don't shadow
-     * the namespace destructured from `$.pine`.
+     * Scan the program body for declarations whose names would collide with
+     * either Pine namespaces or JavaScript reserved keywords. Rename them
+     * with a `_$N` suffix.
      *
-     * Only renames **user variables** — function parameters are handled
-     * separately in generateFunctionDeclaration().
+     * Two collision classes, one rename pass:
      *
-     * Renaming rules:
-     * - Variable declaration target (let fill = ...) → renamed
-     * - Assignment target (fill := ...) → renamed
-     * - Bare identifier read (return fill) → renamed
-     * - Call callee (fill(...)) → NOT renamed (namespace call)
-     * - MemberExpression object (size.tiny) → NOT renamed (namespace access)
-     * - MemberExpression property (array.size) → NOT renamed (method name)
-     * - Object property key ({size: ...}) → NOT renamed (named arg key)
+     *  1. Pine namespace collisions (NAMESPACE_COLLISION_NAMES — e.g. `fill`,
+     *     `size`, `color`, `line`): user variable would shadow the namespace
+     *     destructured from `$.pine`. The CALL SITE `fill(...)` is the
+     *     namespace, NOT the renamed variable, so callees are NOT renamed.
+     *
+     *  2. JS reserved keyword collisions (JS_RESERVED_WORDS — e.g. `delete`,
+     *     `super`, `static`): the generated JS would fail to parse
+     *     (`function delete()` → "Unexpected keyword 'delete'"). The CALL SITE
+     *     `delete(arg)` IS the user function, so callees MUST be renamed.
+     *
+     * The walker checks the original name's source list at each call site to
+     * pick the right behavior.
+     *
+     * Renaming rules (common):
+     * - Variable declaration target (let fill = ...)  → renamed
+     * - Function declaration name (function delete()) → renamed (class 2 only)
+     * - Assignment target (fill := ...)               → renamed
+     * - Bare identifier read (return fill)            → renamed
+     * - MemberExpression object (size.tiny)           → NOT renamed
+     * - MemberExpression property (obj.delete)        → NOT renamed
+     * - Object property key ({size: ...})             → NOT renamed
      */
     private renameConflictingVariables(ast: any) {
         const renameMap = new Map<string, string>();
@@ -91,20 +102,30 @@ export class CodeGenerator {
     }
 
     /**
-     * Walk the AST and collect variable declarations / assignment targets
-     * whose names conflict with CONFLICTING_NAMES.
+     * True if `name` requires renaming — either a Pine namespace collision
+     * or a JS reserved keyword (which would make the generated JS invalid).
+     */
+    private isReservedName(name: string | undefined): boolean {
+        return !!name && (NAMESPACE_COLLISION_NAMES.has(name) || JS_RESERVED_WORDS.has(name));
+    }
+
+    /**
+     * Walk the AST and collect declarations whose names conflict with either
+     * Pine namespaces (NAMESPACE_COLLISION_NAMES) or JS reserved keywords
+     * (JS_RESERVED_WORDS). Both collision classes are renamed with the same
+     * `_$N` suffix scheme.
      */
     private collectConflictingVarNames(node: any, renameMap: Map<string, string>) {
         if (!node || typeof node !== 'object') return;
 
         if (node.type === 'VariableDeclaration') {
             for (const decl of node.declarations) {
-                if (decl.id?.type === 'Identifier' && NAMESPACE_COLLISION_NAMES.has(decl.id.name) && !renameMap.has(decl.id.name)) {
+                if (decl.id?.type === 'Identifier' && this.isReservedName(decl.id.name) && !renameMap.has(decl.id.name)) {
                     renameMap.set(decl.id.name, `${decl.id.name}_$${this.paramRenameCounter++}`);
                 }
                 if (decl.id?.type === 'ArrayPattern') {
                     for (const el of decl.id.elements) {
-                        if (el?.type === 'Identifier' && NAMESPACE_COLLISION_NAMES.has(el.name) && !renameMap.has(el.name)) {
+                        if (el?.type === 'Identifier' && this.isReservedName(el.name) && !renameMap.has(el.name)) {
                             renameMap.set(el.name, `${el.name}_$${this.paramRenameCounter++}`);
                         }
                     }
@@ -113,8 +134,25 @@ export class CodeGenerator {
         }
 
         if (node.type === 'AssignmentExpression' || node.type === 'ReassignmentExpression') {
-            if (node.left?.type === 'Identifier' && NAMESPACE_COLLISION_NAMES.has(node.left.name) && !renameMap.has(node.left.name)) {
+            if (node.left?.type === 'Identifier' && this.isReservedName(node.left.name) && !renameMap.has(node.left.name)) {
                 renameMap.set(node.left.name, `${node.left.name}_$${this.paramRenameCounter++}`);
+            }
+        }
+
+        // User-defined function/method names that collide with reserved identifiers.
+        // The function body inherits the rename via the same renameMap pass.
+        //
+        // Skip methods (`method foo(...) =>`): their JS identifier already gets
+        // a `$M_` prefix in `generateFunctionDeclaration` which is collision-
+        // proof by construction. Adding `_$N` on top would change the Pine
+        // name visible at the call site (`obj.delete()` looks up `delete`,
+        // not `delete_$0`), breaking UFCS retargeting in ExpressionTransformer.
+        if (node.type === 'FunctionDeclaration') {
+            if (node.id?.type === 'Identifier' &&
+                !node.id.isMethod &&
+                this.isReservedName(node.id.name) &&
+                !renameMap.has(node.id.name)) {
+                renameMap.set(node.id.name, `${node.id.name}_$${this.paramRenameCounter++}`);
             }
         }
 
@@ -144,12 +182,19 @@ export class CodeGenerator {
     private renameVariableRefsInAST(node: any, renameMap: Map<string, string>) {
         if (!node || typeof node !== 'object') return;
 
-        // CallExpression: skip callee if it's a matching Identifier, rename args
+        // CallExpression: handle direct-Identifier callees specially.
         if (node.type === 'CallExpression') {
-            // For callee: if it's a MemberExpression (like array.size), handle normally via recursion
-            // If it's a direct Identifier (like fill()), skip it — it's a namespace call
             if (node.callee?.type === 'Identifier' && renameMap.has(node.callee.name)) {
-                // Skip callee, only process arguments
+                // Two cases:
+                //   - JS_RESERVED_WORDS rename (e.g. user `method delete` → `delete_$N`):
+                //     the callee IS the user function — must be renamed.
+                //   - NAMESPACE_COLLISION_NAMES rename (e.g. user `var fill = ...` while
+                //     also calling the built-in `fill(...)`): the callee here refers to
+                //     the namespace, not the renamed user variable — leave it alone.
+                if (JS_RESERVED_WORDS.has(node.callee.name)) {
+                    node.callee.name = renameMap.get(node.callee.name)!;
+                }
+                // else: skip callee
             } else {
                 this.renameVariableRefsInAST(node.callee, renameMap);
             }
@@ -356,7 +401,9 @@ export class CodeGenerator {
     }
 
     // Rename Identifier nodes in an AST subtree (simple, non-context-aware).
-    // Used for function parameter renaming. Stops at FunctionDeclaration boundaries.
+    // Used for the `this → self` rewrite where every `this` refers to the
+    // method receiver and must be rewritten unconditionally. Stops at
+    // FunctionDeclaration boundaries.
     private renameIdentifiersInAST(node: any, renameMap: Map<string, string>) {
         if (!node || typeof node !== 'object') return;
 
@@ -383,58 +430,163 @@ export class CodeGenerator {
         }
     }
 
+    // Rename Identifier nodes belonging to a function's parameters, when the
+    // param name shadows a Pine namespace or built-in (e.g. param `color`
+    // shadows the `color.new(...)` namespace). Context-aware:
+    //   - MemberExpression objects with non-computed access (`color.new(...)`)
+    //     are LEFT ALONE — those are namespace accesses, not the renamed param.
+    //   - CallExpression callees that match the renamed name are LEFT ALONE
+    //     for the same reason (`color(arg)` calls the namespace function).
+    //   - Object literal property keys (`{ color: value }`) are LEFT ALONE.
+    //   - Bare reads (`x = color`) and arguments (`color.new(color, 73)` —
+    //     the inner one) ARE renamed.
+    // Stops at nested FunctionDeclaration boundaries.
+    private renameParamRefsInBody(node: any, renameMap: Map<string, string>) {
+        if (!node || typeof node !== 'object') return;
+
+        // Don't descend into nested functions — they have their own scope.
+        if (node.type === 'FunctionDeclaration') return;
+
+        // CallExpression: skip the callee Identifier when it matches a
+        // renamed param (namespace function call: `color(arg)`).
+        if (node.type === 'CallExpression') {
+            if (node.callee?.type === 'Identifier' && renameMap.has(node.callee.name)) {
+                // Skip callee — leave as namespace function reference.
+            } else {
+                this.renameParamRefsInBody(node.callee, renameMap);
+            }
+            if (node.arguments) {
+                for (const arg of node.arguments) {
+                    this.renameParamRefsInBody(arg, renameMap);
+                }
+            }
+            return;
+        }
+
+        // MemberExpression: skip the object when it matches a renamed param
+        // and the access is non-computed (namespace member access:
+        // `color.new(...)`, `size.tiny`).
+        if (node.type === 'MemberExpression') {
+            if (!node.computed && node.object?.type === 'Identifier' && renameMap.has(node.object.name)) {
+                // Skip the object; nothing else to rename here (property is
+                // a static name on a namespace).
+                return;
+            }
+            this.renameParamRefsInBody(node.object, renameMap);
+            if (node.computed) this.renameParamRefsInBody(node.property, renameMap);
+            return;
+        }
+
+        // Property: rename the value, never the key.
+        if (node.type === 'Property') {
+            this.renameParamRefsInBody(node.value, renameMap);
+            return;
+        }
+
+        // Leaf: rename matching Identifier.
+        if (node.type === 'Identifier' && renameMap.has(node.name)) {
+            node.name = renameMap.get(node.name);
+            return;
+        }
+
+        // Recurse into all children.
+        for (const key of Object.keys(node)) {
+            if (key === 'type') continue;
+            const val = node[key];
+            if (Array.isArray(val)) {
+                for (const child of val) {
+                    if (child && typeof child === 'object') {
+                        this.renameParamRefsInBody(child, renameMap);
+                    }
+                }
+            } else if (val && typeof val === 'object' && val.type) {
+                this.renameParamRefsInBody(val, renameMap);
+            }
+        }
+    }
+
     // Generate FunctionDeclaration
     generateFunctionDeclaration(node) {
         this.write(this.indentStr.repeat(this.indent));
 
-        // Don't output methods as standalone functions - they'll be attached to objects at runtime
-        // Just generate them as regular functions for now, skipping first 'this' param
+        // Methods are emitted as regular JS functions; the receiver is passed
+        // explicitly as the first positional arg by the call-site rewrite
+        // (see ExpressionTransformer's `obj.method(args)` → `$.call(method, id, obj, args)`).
         const isMethod = node.id.isMethod;
 
         // Detect function params that collide with Pine context names (namespaces, builtins, etc.)
         // and rename them to avoid Phase 2 transpiler misinterpreting them as namespace references.
         // e.g., parameter 'color' would be renamed to 'color_$0' to avoid color.__value() injection.
-        const renameMap = new Map<string, string>();
+        // These renames must be applied context-aware in the body so namespace
+        // usage (`color.new(...)`) is preserved while bare reads of the param
+        // are rewritten.
+        const paramRenameMap = new Map<string, string>();
         for (const param of node.params) {
             const paramName = param.type === 'AssignmentPattern' ? param.left.name : param.name;
             if (paramName && CONFLICTING_NAMES.has(paramName)) {
                 const newName = `${paramName}_$${this.paramRenameCounter++}`;
-                renameMap.set(paramName, newName);
+                paramRenameMap.set(paramName, newName);
             }
         }
 
-        // Apply renaming to param nodes and function body before generating code
-        if (renameMap.size > 0) {
+        // For methods whose first Pine param is `this` (the receiver), rename
+        // it to `self` everywhere — `this` cannot survive as a JS param name
+        // and the body's `this.x := y` mutations would otherwise leak onto
+        // `globalThis` instead of the actual receiver. The call-site already
+        // passes the receiver as the first positional arg, so renaming the
+        // param keeps the calling convention consistent.
+        // This rename is context-FREE (every `this` is the receiver), unlike
+        // the param renames above.
+        const isThisParam = (p: any) =>
+            (p.type === 'Identifier' && p.name === 'this') ||
+            (p.type === 'AssignmentPattern' && p.left?.name === 'this');
+        const thisRenameMap = new Map<string, string>();
+        if (isMethod && node.params.length > 0 && isThisParam(node.params[0])) {
+            thisRenameMap.set('this', 'self');
+        }
+
+        // Apply renames to param nodes and function body.
+        if (paramRenameMap.size > 0 || thisRenameMap.size > 0) {
             for (const param of node.params) {
-                if (param.type === 'AssignmentPattern') {
-                    if (renameMap.has(param.left.name)) {
-                        param.left.name = renameMap.get(param.left.name);
-                    }
-                    // Also rename identifiers in default value expressions
-                    this.renameIdentifiersInAST(param.right, renameMap);
-                } else if (param.type === 'Identifier' && renameMap.has(param.name)) {
-                    param.name = renameMap.get(param.name);
+                const target = param.type === 'AssignmentPattern' ? param.left : param;
+                if (target?.type === 'Identifier') {
+                    const newName = paramRenameMap.get(target.name) ?? thisRenameMap.get(target.name);
+                    if (newName) target.name = newName;
+                }
+                if (param.type === 'AssignmentPattern' && param.right) {
+                    // Default value expressions get the same treatment as the body.
+                    if (paramRenameMap.size > 0) this.renameParamRefsInBody(param.right, paramRenameMap);
+                    if (thisRenameMap.size > 0) this.renameIdentifiersInAST(param.right, thisRenameMap);
                 }
             }
-            this.renameIdentifiersInAST(node.body, renameMap);
+            // Body: namespace-shadowing param renames first (context-aware),
+            // then the unconditional `this → self` rewrite.
+            if (paramRenameMap.size > 0) this.renameParamRefsInBody(node.body, paramRenameMap);
+            if (thisRenameMap.size > 0) this.renameIdentifiersInAST(node.body, thisRenameMap);
         }
 
+        // Methods get a `$M_` prefix on their JS identifier so they can't
+        // collide with a regular function of the same Pine name. Pine does
+        // not allow `$` in identifiers, so this prefix is collision-proof.
+        // The call-site rewrite (ExpressionTransformer) and the marker reader
+        // (AnalysisPass) both know about the prefix.
+        const jsFnName = isMethod ? `$M_${node.id.name}` : node.id.name;
+
         this.write('function ');
-        this.write(node.id.name);
+        this.write(jsFnName);
         this.write('(');
 
-        // Parameters (skip first param if it's a method and first param is 'this')
+        // Parameters — render all of them, including the (now-renamed) `self`
+        // receiver for methods. The receiver is passed explicitly by the
+        // call-site rewrite, so it must appear in the param list.
         const params = node.params;
-        const startIdx = isMethod && params.length > 0 && params[0].type === 'Identifier' && params[0].name === 'this' ? 1 : 0;
 
-        for (let i = startIdx; i < params.length; i++) {
+        for (let i = 0; i < params.length; i++) {
             const param = params[i];
             if (param.type === 'Identifier') {
                 this.write(param.name);
             } else if (param.type === 'AssignmentPattern') {
-                // Handle 'this' in AssignmentPattern
-                const leftName = param.left.name === 'this' && isMethod ? 'self' : param.left.name;
-                this.write(leftName);
+                this.write(param.left.name);
                 this.write(' = ');
                 this.generateExpression(param.right);
             }
@@ -452,7 +604,33 @@ export class CodeGenerator {
         // callable via obj.func() dot-notation — only `method` declarations can.
         if (isMethod) {
             this.write(this.indentStr.repeat(this.indent));
-            this.write(`${node.id.name}.__pineMethod__ = true;\n`);
+            this.write(`${jsFnName}.__pineMethod__ = true;\n`);
+        }
+
+        // Emit param-type marker for any params that carried a Pine type
+        // annotation (e.g. `readField(BAR b)`). The transpile phase reads
+        // these to know which params are UDT instances, enabling correct
+        // `b.field[N]` series-lookback rewriting inside the function body.
+        // Inert at runtime; AnalysisPass filters to known UDT types.
+        // Skip the method receiver (now renamed to `self`) — it's passed by
+        // the caller, never a Series of UDT instances, so the rewrite would
+        // be incorrect for it.
+        const typedParams: Array<[string, string]> = [];
+        for (let i = 0; i < node.params.length; i++) {
+            const p = node.params[i];
+            const paramName = p.type === 'AssignmentPattern' ? p.left?.name : p.name;
+            if (isMethod && i === 0 && paramName === 'self') continue;
+            const varType = p.type === 'AssignmentPattern' ? p.left?.varType : p.varType;
+            if (paramName && varType) {
+                typedParams.push([paramName, varType]);
+            }
+        }
+        if (typedParams.length > 0) {
+            this.write(this.indentStr.repeat(this.indent));
+            const entries = typedParams
+                .map(([n, t]) => `${JSON.stringify(n)}: ${JSON.stringify(t)}`)
+                .join(', ');
+            this.write(`${jsFnName}.__pineParamTypes__ = {${entries}};\n`);
         }
     }
 
@@ -519,6 +697,24 @@ export class CodeGenerator {
             }
 
             this.write(';\n');
+
+            // Preserve the explicit Pine type annotation so the AnalysisPass
+            // can register the variable as a UDT instance even when the
+            // initializer's type cannot be inferred from the expression alone
+            // (e.g. `Holder r = arr.get(0)` or `Holder r = map.get(key)`).
+            // Emit a bare string-literal expression statement — acorn keeps it
+            // as `ExpressionStatement(Literal)` and it is a no-op at runtime.
+            const declaredType = decl.id?.varType;
+            const declaredName = decl.id?.type === 'Identifier' ? decl.id.name : null;
+            if (
+                declaredName &&
+                typeof declaredType === 'string' &&
+                /^[A-Za-z_$][\w$]*$/.test(declaredType) &&
+                declaredType[0] === declaredType[0].toUpperCase()
+            ) {
+                this.write(this.indentStr.repeat(this.indent));
+                this.write(`"__pineUdtVar:${declaredName}=${declaredType}";\n`);
+            }
         }
     }
 

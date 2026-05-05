@@ -1,5 +1,34 @@
 # Change Log
 
+## [0.9.14] - 2026-05-05 - UDT & Transpiler Hardening, `request.security`, Streaming & Drawing `na`
+
+### Added
+
+- **`str.format_time(time, format, timezone)`**: Full string-based time formatting aligned with Pine Script (`Str.ts`, tests in `str.test.ts`).
+- **`for...of` runtime helpers**: Codegen uses **`$.iter`** / **`$.entries`** instead of brittle one-off special cases.
+- **UDT registry pre-pass**: **`preProcessUdtRegistry`** runs before analysis so **`ScopeManager`** is populated consistently (5 dedicated tests).
+
+### Fixed
+
+- **Live streaming with `eDate`**: **`runLive`** / live mode now works when an end date is provided; previously the combination was incorrectly rejected or behaved as non-live (**`PineTS.class.ts`**).
+- **`for...in` over `MemberExpression` iterables**: Destructuring in **`for...in`** when the iterable is a member expression (e.g. chained property access) is transformed correctly (**`MainTransformer`**).
+- **`request.security`**: Named arguments resolve through **`parseArgsForPineParams`** with **array/tuple-aware** `remaining_options`; secondary-context **bar alignment** improved; **`calc_bars_count`** threaded through the security pipeline.
+- **Callable drawing/table namespaces**: **`box`**, **`linefill`**, **`polyline`**, **`table`** — fixes for correct call vs instance dispatch in transpiled code.
+- **Reserved words in generated JS**: Transpiler avoids invalid identifiers when Pine names collide with JavaScript reserved words.
+- **Comma-separated typed declarations**: Multiple declarations on one line with shared type; guard tightened so **`chart.point[] a = ..., chart.point[] b = ...`** (dotted / repeated types) is split handled as separate statements instead of mis-parsing (**`parseTypedVarDeclaration`**).
+- **Contextual Pine Script keywords**: Parser treats keywords contextually so valid identifiers / constructs are not broken by overly greedy keyword rules.
+- **UDT field subscripts in call arguments**: Per-bar lookback (`seriesVar.field[1]`) inside function-call arguments is transformed correctly.
+- **UDT field-subscript & method transpiler**: Broader fixes for member access and methods on UDT instances.
+- **UDT `.new()` mixed positional + named args**: When the last argument is a plain object whose keys match UDT field names, it is stripped and applied as named fields instead of shifting positional slots (**`Core.ts` UDT constructor**).
+- **UFCS `obj.method()`**: Method names that are JS reserved words keep correct **`$M_`** naming without double **`_$N`** renames; **`Holder r = arr.get(0)`** with an explicit UDT type registers **`r`** for instance dispatch; **`.delete()`** on built-in drawing objects is not retargeted as a user method.
+- **Typed `na` for drawings**: **`box(na)`**, **`line(na)`**, **`label(na)`**, **`polyline(na)`**, **`linefill(na)`**, **`table(na)`** behave as Pine **typed `na`** / casts, not as calls that build empty drawing instances.
+- **UDT registration across function parameters**: Exiting a function that took a UDT parameter no longer clears outer-scope UDT-instance bindings — prior registrations are **snapshotted and restored** so patterns like **`var T x = T.new(...)`** plus **`foo(T x)`** still resolve **`x.foo()`** later.
+- **Plots & deleted drawings**: Deleted drawing objects are **omitted** from generated plot payloads so consumers do not see stale handles.
+- **Default colors**: Restored sensible default stroke/fill styling for **`box`** and **`polyline`** when colors are omitted.
+- **Documentation**: Various doc updates (merged with this release train).
+
+---
+
 ## [0.9.12] - 2026-04-15 - FMP Provider: `mintick`, Forex vs Crypto & Resilient `getSymbolInfo`
 
 ### Added
