@@ -519,6 +519,78 @@ plot(s == State.Active ? 1 : 0)
         expect(pine2js.code).toContain('return State.Active');
         expect(pine2js.code).toContain('return State.Idle');
     });
+
+    // Pine v6 titled-enum syntax: each member can have an explicit string title
+    // (`member = "Title"`) used by str.tostring() and the input.enum dropdown.
+    // The parser used to expect a bare IDENTIFIER per line and failed at the `=`
+    // with "Expected IDENTIFIER but got OPERATOR".
+    it('should parse titled enum: member = "title"', () => {
+        const code = `
+//@version=6
+indicator("Titled Enum")
+
+enum tz
+    utc  = "UTC"
+    exch = ""
+    ny   = "America/New_York"
+
+t = tz.utc
+plot(close)
+`;
+        const pine2js = pineToJS(code);
+        expect(pine2js.success).toBe(true);
+        expect(pine2js.code).toBeDefined();
+        // Each titled member must use its title as the runtime value, not the
+        // dotted "EnumName.member" string PineTS used to emit.
+        expect(pine2js.code).toMatch(/utc:\s*['"]UTC['"]/);
+        expect(pine2js.code).toMatch(/exch:\s*['"]['"]/);
+        expect(pine2js.code).toMatch(/ny:\s*['"]America\/New_York['"]/);
+    });
+
+    // Untitled members must serialise to the bare member name to match TV's
+    // str.tostring(EnumName.member) output. PineTS used to emit "EnumName.member"
+    // which diverged from TradingView.
+    it('untitled enum members serialise to the bare member name (TV parity)', () => {
+        const code = `
+//@version=6
+indicator("Untitled Enum TV Parity")
+
+enum Dir
+    up
+    dn
+
+d = Dir.up
+plot(close)
+`;
+        const pine2js = pineToJS(code);
+        expect(pine2js.success).toBe(true);
+        // Member runtime values must be just the member name, not "Dir.up".
+        expect(pine2js.code).toMatch(/up:\s*['"]up['"]/);
+        expect(pine2js.code).toMatch(/dn:\s*['"]dn['"]/);
+        expect(pine2js.code).not.toMatch(/up:\s*['"]Dir\.up['"]/);
+    });
+
+    // Mixed titled + untitled members in the same enum body.
+    it('should parse mixed titled and untitled members in one enum', () => {
+        const code = `
+//@version=6
+indicator("Mixed Enum")
+
+enum Mix
+    plain
+    withTitle = "With Title"
+    other     = "Other"
+
+x = Mix.plain
+y = Mix.withTitle
+plot(close)
+`;
+        const pine2js = pineToJS(code);
+        expect(pine2js.success).toBe(true);
+        expect(pine2js.code).toMatch(/plain:\s*['"]plain['"]/);
+        expect(pine2js.code).toMatch(/withTitle:\s*['"]With Title['"]/);
+        expect(pine2js.code).toMatch(/other:\s*['"]Other['"]/);
+    });
 });
 
 // ---------------------------------------------------------------------------
