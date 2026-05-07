@@ -147,13 +147,19 @@ export function security_lower_tf(context: any) {
         const cacheKey = `${_symbol}_${_timeframe}_${_expression_name}_lower`;
 
         if (!context.cache[cacheKey]) {
-            const buffer = 1000 * 60 * 60 * 24 * 30; // 30 days buffer
-
-            // Determine start date: use context.sDate if available, otherwise
-            // derive from the earliest bar's openTime (same logic as security.ts)
+            // For request.security_lower_tf the secondary's data window is
+            // bounded by the chart's own window — every LTF bar that
+            // contributes to a chart bar falls inside that chart bar's
+            // [openTime, closeTime]. Adding a fixed historical buffer (the
+            // way security.ts does for higher-timeframe warmup) blows up
+            // bar counts dramatically: a 30-day buffer at 1-minute LTF
+            // forces the secondary to iterate ~43,200 extra bars before
+            // the main loop can advance past bar 0, which manifests as a
+            // multi-minute hang on small charts (e.g. 50 bars on 5m). Use
+            // the chart's earliest openTime directly.
             const effectiveSDate = context.sDate
                 || (context.marketData?.length > 0 ? context.marketData[0].openTime : undefined);
-            const adjustedSDate = effectiveSDate ? effectiveSDate - buffer : undefined;
+            const adjustedSDate = effectiveSDate;
 
             // Align secondary's end date with the chart's actual data so that
             // `barstate.islast` in the secondary fires at the same temporal point as
