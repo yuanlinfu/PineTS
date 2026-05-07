@@ -128,8 +128,20 @@ export function transformAssignmentExpression(node: any, scopeManager: ScopeMana
         { parent: node.right, inNamespaceCall: false },
         {
             Identifier(node: any, state: any, c: any) {
+                // Don't unwrap when the identifier is a namespace base in a
+                // constant access like `label.style_label_down`. NAMESPACES_LIKE
+                // mixes Series-wrapper names (time, na, dayofweek, …) with
+                // drawing namespaces (label, line, box, …); only the former
+                // have a .__value Series. For a member access where this
+                // identifier is the object, treat it as a plain namespace base.
+                const isNamespaceBase =
+                    state.parent &&
+                    state.parent.type === 'MemberExpression' &&
+                    !state.parent.computed &&
+                    state.parent.object === node;
+
                 // Rewrite NAMESPACES_LIKE entries (na, time, etc.) to $.get(__value, 0)
-                if (NAMESPACES_LIKE.includes(node.name) && scopeManager.isContextBound(node.name)) {
+                if (NAMESPACES_LIKE.includes(node.name) && scopeManager.isContextBound(node.name) && !isNamespaceBase) {
                     const originalName = node.name;
                     const valueExpr = {
                         type: 'MemberExpression',
@@ -1219,6 +1231,16 @@ export function transformReturnStatement(node: any, scopeManager: ScopeManager):
                     },
                     MemberExpression(node: any) {
                         transformMemberExpression(node, '', scopeManager);
+                    },
+                    // When an arrow function's last statement is an assignment
+                    // (e.g. `tracker.field := …`), the parser folds it into the
+                    // implicit return as an AssignmentExpression. Without this
+                    // visitor, the default acorn-walk fall-through visits the
+                    // LHS as a MemberExpression — which doesn't rewrite the
+                    // root identifier of an assignment LHS — and `tracker`
+                    // leaks bare → "ReferenceError: tracker is not defined".
+                    AssignmentExpression(node: any, state: ScopeManager) {
+                        transformAssignmentExpression(node, state);
                     },
                     // c is the callback function for recursion (acorn-walk)
                     CallExpression(node: any, state: ScopeManager, c: any) {

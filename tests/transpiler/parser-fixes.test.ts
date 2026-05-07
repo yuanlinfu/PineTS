@@ -1830,4 +1830,194 @@ plot(startOfNewLeg(currentLeg) ? 1 : 0)
         expect(r).toBeDefined();
         expect(r.plots).toBeDefined();
     });
+
+    // Regression: an identifier that appears ONLY in a function-parameter
+    // default position (e.g. `myFn(color bg = na)`) used to be missed by
+    // the implicit-import injector because its walker descended into the
+    // function body but never the params. Result: `na` was absent from
+    // the top-level `const { … } = $.pine` destructure and JS threw
+    // "ReferenceError: na is not defined" when the default fired.
+    it('includes `na` in implicit destructure when used only in a default param', async () => {
+        const code = `
+//@version=6
+indicator("Test")
+checkBg(color bg = na) =>
+    na(bg) ? 1 : 0
+plot(checkBg() == 1 ? 1 : 0)
+`;
+        const result = transpile(code);
+        const jsCode = result.toString();
+
+        // Top-level destructure must include `na`.
+        const destructureMatch = jsCode.match(/const\s*\{([^}]*)\}\s*=\s*\$\.pine/);
+        expect(destructureMatch).not.toBeNull();
+        expect(destructureMatch![1]).toContain('na');
+    });
+
+    it('runs at runtime without ReferenceError when fn has `na`-default param', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', null, new Date('2024-06-01').getTime(), new Date('2024-06-15').getTime());
+        const code = `
+//@version=6
+indicator("na default")
+checkBg(color bg = na) =>
+    na(bg) ? 1 : 0
+plot(checkBg())
+`;
+        const r = await pineTS.run(code);
+        expect(r).toBeDefined();
+        expect(r.plots).toBeDefined();
+    });
+
+    // Regression: when an arrow function's last statement is an assignment to
+    // a UDT field on a global var, the Pine parser folds it into the implicit
+    // return as an AssignmentExpression. The return-walker had no
+    // AssignmentExpression visitor — the default acorn-walk fall-through
+    // visited the LHS as a MemberExpression, which doesn't rewrite the root
+    // identifier of an assignment LHS. Result: `tracker` leaked bare in
+    // `return $.precision(tracker.bottom = …)` → "ReferenceError: tracker is
+    // not defined" at runtime. Mirrors `updateTrailingExtremes()` in the
+    // LuxAlgo Smart Money Concepts indicator.
+    it('rewrites root identifier in implicit-return AssignmentExpression on UDT field', () => {
+        const code = `
+//@version=6
+indicator("Test")
+type Tracker
+    float top
+    float bottom
+var Tracker tracker = Tracker.new(0.0, 0.0)
+update() =>
+    tracker.top    := math.max(high, tracker.top)
+    tracker.bottom := math.min(low,  tracker.bottom)
+update()
+plot(tracker.top)
+`;
+        const result = transpile(code);
+        const jsCode = result.toString();
+
+        // The implicit return must reference the scoped form of `tracker`.
+        // Bare `tracker.bottom` on the LHS of the return's assignment was the bug.
+        expect(jsCode).toMatch(/return\s+\$\.precision\(\s*\$\.get\(\s*\$\.var\.glb1_tracker\s*,\s*0\s*\)\.bottom\s*=/);
+        // The implicit return should NOT contain a bare `tracker.bottom = ` LHS
+        // (i.e. without a `$.get(...)` wrapper before it).
+        expect(jsCode).not.toMatch(/return\s+\$\.precision\(\s*tracker\.bottom\s*=/);
+    });
+
+    it('runs at runtime without ReferenceError when fn ends with UDT-field assignment', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', null, new Date('2024-06-01').getTime(), new Date('2024-06-15').getTime());
+        const code = `
+//@version=6
+indicator("UDT implicit-return")
+type T
+    float top
+    float bottom
+var T t = T.new(0.0, 0.0)
+update() =>
+    t.top    := math.max(high, t.top)
+    t.bottom := math.min(low,  t.bottom)
+update()
+plot(t.top)
+`;
+        const r = await pineTS.run(code);
+        expect(r).toBeDefined();
+        expect(r.plots).toBeDefined();
+    });
+
+    // Regression: a function parameter used directly as a history-lookback
+    // index (e.g. `high[size]` where `size` is a fn param) used to be
+    // mis-scoped to `$.let.size_$0` (a global let lookup). That returned
+    // undefined → resolved to 0 → `high[size]` silently returned the
+    // CURRENT bar instead of the bar `size` ago. Pivot-detection idioms like
+    //   `high[size] > ta.highest(size)`
+    // were therefore never strictly true — breaking SMC's `leg()` and any
+    // other indicator that uses the same pattern.
+    it('emits bare param identifier (not $.let.<name>) when used as a history-lookback index', () => {
+        const code = `
+//@version=5
+indicator("Param as history index")
+probe(int size) =>
+    int k = size + 0
+    h_via_param = high[size]
+    h_via_param == high[k] ? 1 : 0
+plot(probe(5))
+`;
+        const result = transpile(code);
+        const jsCode = result.toString();
+
+        // Inside the function body, the index must reference the bare param
+        // identifier `size_$0`, NOT a `$.let.size_$0` global lookup.
+        // The exact wrapping (`high[$.get(size_$0,0)]` vs
+        // `$.get(high, $.get(size_$0, 0))`) depends on the call-context, so
+        // the assertion only constrains: NO `$.let.size_$0` reference for
+        // the param's bare name.
+        expect(jsCode).not.toMatch(/\$\.let\.size_\$0/);
+        // And the bare `size_$0` must appear as an index source at least once.
+        expect(jsCode).toMatch(/\bsize_\$0\b/);
+    });
+
+    it('runs at runtime: param-direct subscript yields a defined value', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', null, new Date('2024-06-01').getTime(), new Date('2024-06-15').getTime());
+        const code = `
+//@version=5
+indicator("param-as-history-index runtime")
+probe(int size) =>
+    h = high[size]
+    not na(h) ? 1 : 0
+plot(probe(2), "defined")
+`;
+        const r = await pineTS.run(code);
+        expect(r).toBeDefined();
+        const data = r.plots['defined']?.data || [];
+        // Before the fix, param-direct subscript resolved to undefined →
+        // `not na(h)` was always 0 after warmup. After the fix it returns
+        // the actual lookback value → 1 on bars with sufficient history.
+        const definedEntries = data.filter((e: any) => e.value === 1);
+        expect(definedEntries.length).toBeGreaterThan(0);
+    });
+
+    // Regression: `<drawing-namespace>.<const>` on the RHS of an assignment
+    // (e.g. `s := label.style_label_down`) used to throw "Cannot read
+    // properties of undefined (reading 'style_label_down')". The
+    // assignment-RHS Identifier visitor unwrapped `label` via the
+    // `__value` Series rewrite (which is correct for `time`/`na`/etc.) —
+    // but drawing namespaces have no `__value`, so the dereference failed.
+    it('does not unwrap drawing-namespace base in assignment-RHS member access', () => {
+        const code = `
+//@version=5
+indicator("namespace const RHS")
+flip(bool b) =>
+    string s = label.style_label_up
+    if b
+        s := label.style_label_down
+    s
+plot(flip(false) == label.style_label_up ? 1 : 0)
+`;
+        const result = transpile(code);
+        const jsCode = result.toString();
+
+        // The assignment RHS must reference `label.style_label_down`
+        // directly, not via the buggy `label.__value` indirection.
+        expect(jsCode).toMatch(/\$\.set\([^,]+,\s*label\.style_label_down\)/);
+        expect(jsCode).not.toMatch(/label\.__value/);
+    });
+
+    it('runs at runtime: drawing-namespace const RHS in assignment fires without error', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', null, new Date('2024-06-01').getTime(), new Date('2024-06-15').getTime());
+        const code = `
+//@version=5
+indicator("ns const RHS runtime")
+flip(bool b) =>
+    string s = label.style_label_up
+    if b
+        s := label.style_label_down
+    s
+plot(flip(true) == label.style_label_down ? 1 : 0, "ok")
+`;
+        const r = await pineTS.run(code);
+        expect(r).toBeDefined();
+        const data = r.plots['ok']?.data || [];
+        // Before the fix this threw at runtime. After, every bar emits 1
+        // (the assigned RHS equals `label.style_label_down`).
+        const okEntries = data.filter((e: any) => e.value === 1);
+        expect(okEntries.length).toBeGreaterThan(0);
+    });
 });

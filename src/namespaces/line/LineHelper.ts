@@ -66,11 +66,17 @@ export class LineHelper {
     }
 
     private _resolvePoint(point: ChartPointObject): { x: number; xloc: string } {
-        if (point.index !== undefined) {
-            return { x: point.index, xloc: 'bi' };
-        } else if (point.time !== undefined) {
-            return { x: point.time, xloc: 'bt' };
-        }
+        // Treat NaN as "not provided" so `chart.point.new(time, na, price)`
+        // (idiomatic in TV-published indicators — e.g. SMC's drawStructure)
+        // correctly resolves to a time-based point. Without the NaN check,
+        // `point.index !== undefined` is true for NaN and the helper
+        // returns x = NaN, leaving every line/box with x1=NaN/x2=NaN.
+        const hasIndex = point.index !== undefined &&
+            !(typeof point.index === 'number' && isNaN(point.index));
+        const hasTime = point.time !== undefined &&
+            !(typeof point.time === 'number' && isNaN(point.time));
+        if (hasIndex) return { x: point.index!, xloc: 'bi' };
+        if (hasTime) return { x: point.time!, xloc: 'bt' };
         return { x: 0, xloc: 'bi' };
     }
 

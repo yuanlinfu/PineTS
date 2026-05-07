@@ -67,11 +67,26 @@ export function transformArrayIndex(node: any, scopeManager: ScopeManager): void
 
         // Only transform if it's not a context-bound variable
         if (!scopeManager.isContextBound(node.property.name)) {
-            // Transform property to $.kind.scopedName
-            node.property = createScopedVariableReference(node.property.name, scopeManager);
+            // Local series var (e.g. function parameter) used as an index:
+            // keep as a bare identifier wrapped with $.get(param, 0). Mirrors
+            // the same handling at the loop-variable case above and the
+            // object-position case below. Without this branch, a function
+            // param used as a history-lookback index (e.g. `high[size]` where
+            // `size` is a fn param) is mis-scoped to `$.let.size_$0`, which
+            // is undefined → resolves to 0 → `high[size]` returns the current
+            // bar instead of the bar `size` ago, breaking pivot-detection
+            // idioms like `high[size] > ta.highest(size)`.
+            if (scopeManager.isLocalSeriesVar(node.property.name)) {
+                const plainIdentifier = ASTFactory.createIdentifier(node.property.name);
+                plainIdentifier._skipTransformation = true;
+                node.property = ASTFactory.createGetCall(plainIdentifier, 0);
+            } else {
+                // Transform property to $.kind.scopedName
+                node.property = createScopedVariableReference(node.property.name, scopeManager);
 
-            // Add [0] to the index: $.get($.kind.scopedName, 0)
-            node.property = ASTFactory.createGetCall(node.property, 0);
+                // Add [0] to the index: $.get($.kind.scopedName, 0)
+                node.property = ASTFactory.createGetCall(node.property, 0);
+            }
         }
     }
 
