@@ -5,6 +5,7 @@ import { parseArgsForPineParams } from '../utils';
 import { BoxObject } from './BoxObject';
 import { ChartPointObject } from '../chart/ChartPointObject';
 import { NAHelper } from '../Core';
+import { silentInSecondary } from '../silentInSecondary';
 
 //prettier-ignore
 const BOX_NEW_SIGNATURES = [
@@ -167,6 +168,7 @@ export class BoxHelper {
     }
 
     // box.new() — supports both chart.point and legacy signatures
+    @silentInSecondary
     new(...args: any[]): BoxObject {
         const parsed = parseArgsForPineParams<any>(args, BOX_NEW_SIGNATURES, BOX_NEW_ARGS_TYPES);
 
@@ -234,22 +236,27 @@ export class BoxHelper {
 
     // --- Coordinate setters ---
 
+    @silentInSecondary
     set_left(id: BoxObject, left: number): void {
         if (id && !id._deleted) id.left = this._resolve(left);
     }
 
+    @silentInSecondary
     set_right(id: BoxObject, right: number): void {
         if (id && !id._deleted) id.right = this._resolve(right);
     }
 
+    @silentInSecondary
     set_top(id: BoxObject, top: number): void {
         if (id && !id._deleted) id.top = this._resolve(top);
     }
 
+    @silentInSecondary
     set_bottom(id: BoxObject, bottom: number): void {
         if (id && !id._deleted) id.bottom = this._resolve(bottom);
     }
 
+    @silentInSecondary
     set_lefttop(id: BoxObject, left: number, top: number): void {
         if (id && !id._deleted) {
             id.left = this._resolve(left);
@@ -257,6 +264,7 @@ export class BoxHelper {
         }
     }
 
+    @silentInSecondary
     set_rightbottom(id: BoxObject, right: number, bottom: number): void {
         if (id && !id._deleted) {
             id.right = this._resolve(right);
@@ -264,6 +272,7 @@ export class BoxHelper {
         }
     }
 
+    @silentInSecondary
     set_top_left_point(id: BoxObject, point: ChartPointObject): void {
         if (id && !id._deleted && point) {
             const r = this._resolvePoint(point);
@@ -273,6 +282,7 @@ export class BoxHelper {
         }
     }
 
+    @silentInSecondary
     set_bottom_right_point(id: BoxObject, point: ChartPointObject): void {
         if (id && !id._deleted && point) {
             const r = this._resolvePoint(point);
@@ -282,6 +292,7 @@ export class BoxHelper {
         }
     }
 
+    @silentInSecondary
     set_xloc(id: BoxObject, left: number, right: number, xloc: string): void {
         if (id && !id._deleted) {
             id.left = this._resolve(left);
@@ -292,56 +303,69 @@ export class BoxHelper {
 
     // --- Style setters ---
 
+    @silentInSecondary
     set_bgcolor(id: BoxObject, color: string): void {
         if (id && !id._deleted) id.bgcolor = this._resolve(color);
     }
 
+    @silentInSecondary
     set_border_color(id: BoxObject, color: string): void {
         if (id && !id._deleted) id.border_color = this._resolve(color);
     }
 
+    @silentInSecondary
     set_border_width(id: BoxObject, width: number): void {
         if (id && !id._deleted) id.border_width = this._resolve(width) ?? 1;
     }
 
+    @silentInSecondary
     set_border_style(id: BoxObject, style: string): void {
         if (id && !id._deleted) id.border_style = this._resolve(style);
     }
 
+    @silentInSecondary
     set_extend(id: BoxObject, extend: string): void {
         if (id && !id._deleted) id.extend = this._resolve(extend);
     }
 
     // --- Text setters ---
 
+    @silentInSecondary
     set_text(id: BoxObject, text: string): void {
         if (id && !id._deleted) id.text = this._resolve(text) || '';
     }
 
+    @silentInSecondary
     set_text_color(id: BoxObject, color: string): void {
         if (id && !id._deleted) id.text_color = this._resolve(color);
     }
 
+    @silentInSecondary
     set_text_size(id: BoxObject, size: string): void {
         if (id && !id._deleted) id.text_size = this._resolve(size);
     }
 
+    @silentInSecondary
     set_text_halign(id: BoxObject, align: string): void {
         if (id && !id._deleted) id.text_halign = this._resolve(align);
     }
 
+    @silentInSecondary
     set_text_valign(id: BoxObject, align: string): void {
         if (id && !id._deleted) id.text_valign = this._resolve(align);
     }
 
+    @silentInSecondary
     set_text_wrap(id: BoxObject, wrap: string): void {
         if (id && !id._deleted) id.text_wrap = this._resolve(wrap);
     }
 
+    @silentInSecondary
     set_text_font_family(id: BoxObject, family: string): void {
         if (id && !id._deleted) id.text_font_family = this._resolve(family);
     }
 
+    @silentInSecondary
     set_text_formatting(id: BoxObject, formatting: string): void {
         if (id && !id._deleted) id.text_formatting = this._resolve(formatting);
     }
@@ -366,6 +390,7 @@ export class BoxHelper {
 
     // --- Management ---
 
+    @silentInSecondary
     copy(id: BoxObject): BoxObject | undefined {
         if (!id) return undefined;
         const b = id.copy();
@@ -377,6 +402,7 @@ export class BoxHelper {
         return b;
     }
 
+    @silentInSecondary
     delete(id: BoxObject): void {
         if (id) id._deleted = true;
     }

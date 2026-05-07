@@ -4,6 +4,7 @@ import { Series } from '../Series';
 import { PineTypeObject } from './PineTypeObject';
 import { parseArgsForPineParams } from './utils';
 import type { IndicatorOptions, PlotCharOptions } from '../types/PineTypes';
+import { silentInSecondary } from './silentInSecondary';
 
 //prettier-ignore
 const TIMESTAMP_SIGNATURES = [
@@ -138,6 +139,7 @@ export class AlertHelper {
         return Series.from(source).get(0);
     }
 
+    @silentInSecondary
     any(message: any, freq?: any, opts?: any): void {
         const msg = Series.from(message).get(0);
         const f = freq ? Series.from(freq).get(0) : ALERT_FREQ.freq_once_per_bar;
@@ -260,6 +262,7 @@ export class Core {
     /** Per-callsite, per-bar dedup for alertcondition (prevents duplicate fires on live re-execution). */
     private _acFiredKeys: Set<string> = new Set();
 
+    @silentInSecondary
     alertcondition(condition: any, title?: any, message?: any) {
         const cond = Series.from(condition).get(0);
 

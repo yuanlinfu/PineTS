@@ -5,6 +5,7 @@ import { parseArgsForPineParams } from '../utils';
 import { LabelObject } from './LabelObject';
 import { ChartPointObject } from '../chart/ChartPointObject';
 import { NAHelper } from '../Core';
+import { silentInSecondary } from '../silentInSecondary';
 
 //prettier-ignore
 const LABEL_NEW_SIGNATURES = [
@@ -151,6 +152,7 @@ export class LabelHelper {
     // Supports two signatures:
     //   label.new(x, y, text, xloc, yloc, color, style, textcolor, size, textalign, tooltip, text_font_family, force_overlay)
     //   label.new(point, text, xloc, yloc, color, style, textcolor, size, textalign, tooltip, text_font_family, force_overlay)
+    @silentInSecondary
     new(...args: any[]): LabelObject {
         const parsed = parseArgsForPineParams<any>(args, LABEL_NEW_SIGNATURES, LABEL_NEW_ARGS_TYPES);
 
@@ -209,14 +211,17 @@ export class LabelHelper {
 
     // --- Setter methods ---
 
+    @silentInSecondary
     set_x(id: LabelObject, x: number): void {
         if (id && !id._deleted) id.x = x;
     }
 
+    @silentInSecondary
     set_y(id: LabelObject, y: number): void {
         if (id && !id._deleted) id.y = y;
     }
 
+    @silentInSecondary
     set_xy(id: LabelObject, x: number, y: number): void {
         if (id && !id._deleted) {
             id.x = x;
@@ -224,42 +229,52 @@ export class LabelHelper {
         }
     }
 
+    @silentInSecondary
     set_text(id: LabelObject, text: string): void {
         if (id && !id._deleted) id.text = text;
     }
 
+    @silentInSecondary
     set_color(id: LabelObject, color: string): void {
         if (id && !id._deleted) id.color = color;
     }
 
+    @silentInSecondary
     set_textcolor(id: LabelObject, textcolor: string): void {
         if (id && !id._deleted) id.textcolor = textcolor;
     }
 
+    @silentInSecondary
     set_size(id: LabelObject, size: string): void {
         if (id && !id._deleted) id.size = size;
     }
 
+    @silentInSecondary
     set_style(id: LabelObject, style: string): void {
         if (id && !id._deleted) id.style = style;
     }
 
+    @silentInSecondary
     set_textalign(id: LabelObject, textalign: string): void {
         if (id && !id._deleted) id.textalign = textalign;
     }
 
+    @silentInSecondary
     set_tooltip(id: LabelObject, tooltip: string): void {
         if (id && !id._deleted) id.tooltip = tooltip;
     }
 
+    @silentInSecondary
     set_xloc(id: LabelObject, xloc: string): void {
         if (id && !id._deleted) id.xloc = xloc;
     }
 
+    @silentInSecondary
     set_yloc(id: LabelObject, yloc: string): void {
         if (id && !id._deleted) id.yloc = yloc;
     }
 
+    @silentInSecondary
     set_point(id: LabelObject, point: ChartPointObject): void {
         if (id && !id._deleted && point) {
             // Treat NaN as "not provided" so `chart.point.new(time, na, price)`
@@ -299,6 +314,7 @@ export class LabelHelper {
 
     // --- Management methods ---
 
+    @silentInSecondary
     copy(id: LabelObject): LabelObject | undefined {
         if (!id) return undefined;
         const lbl = id.copy();
@@ -310,6 +326,7 @@ export class LabelHelper {
         return lbl;
     }
 
+    @silentInSecondary
     delete(id: LabelObject): void {
         if (id) id._deleted = true;
     }

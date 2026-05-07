@@ -4,6 +4,7 @@ import { Series } from '../../Series';
 import { LineObject } from '../line/LineObject';
 import { LinefillObject } from './LinefillObject';
 import { NAHelper } from '../Core';
+import { silentInSecondary } from '../silentInSecondary';
 
 export class LinefillHelper {
     private _linefills: LinefillObject[] = [];
@@ -74,6 +75,7 @@ export class LinefillHelper {
     // lines (in either order), the existing one is replaced rather than creating
     // a duplicate. This prevents accumulation when linefill.new() is called
     // every bar without explicitly deleting the old fill.
+    @silentInSecondary
     new(line1: LineObject, line2: LineObject, color: any): LinefillObject {
         // Resolve thunks: in `var` UDT declarations, line.new() calls are hoisted
         // as thunks (functions). Resolve them here so LinefillObject stores actual
@@ -125,6 +127,7 @@ export class LinefillHelper {
     }
 
     // linefill.set_color(id, color) → void
+    @silentInSecondary
     set_color(id: LinefillObject, color: any): void {
         if (id && !id._deleted) {
             id.color = this._resolve(color) || '';
@@ -142,6 +145,7 @@ export class LinefillHelper {
     }
 
     // linefill.delete(id) → void
+    @silentInSecondary
     delete(id: LinefillObject): void {
         if (id) id._deleted = true;
     }
