@@ -11,6 +11,38 @@ const UNDEFINED_ARG = {
     name: 'undefined',
 };
 
+/**
+ * Build the third argument to a `*.param(value, idx, name)` call. The
+ * statically-allocated `pN` string is unique across the script, but
+ * `Context.param` stores the resulting series in `context.params[name]` —
+ * a globally-keyed map — so two distinct call paths through the same
+ * function body would clobber each other (the function body bakes in
+ * the same `pN`, but each call writes a different value). Mirroring the
+ * existing ta-callsite-id convention (`$$.id + '_taN'`), we prefix the
+ * static `pN` with the current call-path id when inside a fn scope so
+ * each path writes to its own `params[path|pN]` slot. At top level
+ * `$$` doesn't exist, so we fall back to the literal `pN`.
+ */
+function makeParamNameArg(scopeManager: ScopeManager, paramId: string): any {
+    const literal = { type: 'Identifier', name: `'${paramId}'` };
+    // Use any-fn-scope-on-stack rather than `getCurrentScopeType() === 'fn'`
+    // — params can be emitted from inside if/for/while/switch nested inside
+    // a function body, where the immediate scope is e.g. 'if' but `$$` is
+    // still the function's local context.
+    if (!scopeManager.isInsideFunctionScope()) return literal;
+    const [localCtxName] = scopeManager.getVariable('$$');
+    if (!localCtxName) return literal;
+    return {
+        type: 'BinaryExpression',
+        operator: '+',
+        left: ASTFactory.createMemberExpression(
+            ASTFactory.createLocalContextIdentifier(),
+            ASTFactory.createIdentifier('id'),
+        ),
+        right: literal,
+    };
+}
+
 export function createScopedVariableReference(name: string, scopeManager: ScopeManager): any {
     const [scopedName, kind] = scopeManager.getVariable(name);
 
@@ -869,7 +901,7 @@ function getParamFromConditionalExpression(node: any, scopeManager: ScopeManager
     const paramCall = {
         type: 'CallExpression',
         callee: memberExpr,
-        arguments: [node, UNDEFINED_ARG, { type: 'Identifier', name: `'${nextParamId}'` }],
+        arguments: [node, UNDEFINED_ARG, makeParamNameArg(scopeManager, nextParamId)],
         _transformed: true,
         _isParamCall: true,
     };
@@ -1097,7 +1129,7 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
         const paramCall = {
             type: 'CallExpression',
             callee: memberExpr,
-            arguments: [transformedObject, transformedProperty, { type: 'Identifier', name: `'${nextParamId}'` }],
+            arguments: [transformedObject, transformedProperty, makeParamNameArg(scopeManager, nextParamId)],
             _transformed: true,
             _isParamCall: true,
         };
@@ -1253,7 +1285,7 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
             const paramCall = {
                 type: 'CallExpression',
                 callee: memberExpr,
-                arguments: [arg, UNDEFINED_ARG, { type: 'Identifier', name: `'${nextParamId}'` }],
+                arguments: [arg, UNDEFINED_ARG, makeParamNameArg(scopeManager, nextParamId)],
                 _transformed: true,
                 _isParamCall: true,
             };
@@ -1284,7 +1316,7 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
     const paramCall = {
         type: 'CallExpression',
         callee: memberExpr,
-        arguments: [transformedArg, UNDEFINED_ARG, { type: 'Identifier', name: `'${nextParamId}'` }],
+        arguments: [transformedArg, UNDEFINED_ARG, makeParamNameArg(scopeManager, nextParamId)],
         _transformed: true,
         _isParamCall: true,
     };

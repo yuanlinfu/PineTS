@@ -1026,9 +1026,9 @@ let src_open = input.any({ title: 'Open Source', defval: open });
   function angle(src) {
     const $$ = $.peekCtx();
     $$.const.fn1_rad2degree = $.init($$.const.fn1_rad2degree, 180 / Math.PI);
-    const p0 = ta.param(14, undefined, 'p0');
+    const p0 = ta.param(14, undefined, $$.id + 'p0');
     const temp_1 = ta.atr(p0, $$.id + "_ta0");
-    const p1 = math.param(($.get(src, 0) - $.get(src, 1)) / temp_1, undefined, 'p1');
+    const p1 = math.param(($.get(src, 0) - $.get(src, 1)) / temp_1, undefined, $$.id + 'p1');
     const temp_2 = math.atan(p1);
     $$.const.fn1_ang = $.init($$.const.fn1_ang, $.get($$.const.fn1_rad2degree, 0) * temp_2);
     return $.precision($.get($$.const.fn1_ang, 0));

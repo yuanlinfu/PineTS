@@ -160,11 +160,16 @@ export class LabelHelper {
 
         if (parsed.point instanceof ChartPointObject) {
             const pt = parsed.point as ChartPointObject;
-            if (pt.index !== undefined) {
-                x = pt.index;
+            // Treat NaN as "not provided" — see set_point() comment for context.
+            const hasIndex = pt.index !== undefined &&
+                !(typeof pt.index === 'number' && isNaN(pt.index));
+            const hasTime = pt.time !== undefined &&
+                !(typeof pt.time === 'number' && isNaN(pt.time));
+            if (hasIndex) {
+                x = pt.index!;
                 xloc = xloc || 'bi';
-            } else if (pt.time !== undefined) {
-                x = pt.time;
+            } else if (hasTime) {
+                x = pt.time!;
                 xloc = xloc || 'bt';
             } else {
                 x = 0;
@@ -257,11 +262,21 @@ export class LabelHelper {
 
     set_point(id: LabelObject, point: ChartPointObject): void {
         if (id && !id._deleted && point) {
-            if (point.index !== undefined) {
-                id.x = point.index;
+            // Treat NaN as "not provided" so `chart.point.new(time, na, price)`
+            // and `chart.point.new(na, bar_index, price)` (idiomatic in TV-
+            // published indicators, e.g. SMC's drawHighLowSwings) correctly
+            // resolve to whichever coord is actually set. Without the NaN
+            // check, `point.index !== undefined` is true for NaN and the
+            // label silently lands at x=NaN, hiding it from the chart.
+            const hasIndex = point.index !== undefined &&
+                !(typeof point.index === 'number' && isNaN(point.index));
+            const hasTime = point.time !== undefined &&
+                !(typeof point.time === 'number' && isNaN(point.time));
+            if (hasIndex) {
+                id.x = point.index!;
                 id.xloc = 'bi';
-            } else if (point.time !== undefined) {
-                id.x = point.time;
+            } else if (hasTime) {
+                id.x = point.time!;
                 id.xloc = 'bt';
             }
             id.y = point.price;

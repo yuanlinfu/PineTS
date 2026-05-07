@@ -212,7 +212,18 @@ export class Context {
                 return _this.data.close.length - 1;
             },
             get last_bar_time() {
-                return _this.data.openTime.get(_this.data.openTime.length - 1);
+                // TV semantics: `last_bar_time` is the open time of the LAST
+                // bar of the chart's history — a CONSTANT across the whole
+                // script execution, even when iterating over historical bars.
+                // PineTS has the full preloaded series on `marketData`, so we
+                // read the absolute last bar's openTime there. Falling back
+                // to the progressively-fed `data.openTime` (current bar's
+                // time) is best-effort if marketData isn't available.
+                const md = _this.marketData;
+                if (Array.isArray(md) && md.length > 0) {
+                    return md[md.length - 1].openTime;
+                }
+                return _this.data.openTime.get(0);
             },
             get timenow() {
                 return new Date().getTime();

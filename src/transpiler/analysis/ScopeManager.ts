@@ -202,6 +202,20 @@ export class ScopeManager {
         return this.scopeTypes[this.scopeTypes.length - 1];
     }
 
+    /**
+     * True when any active scope on the stack is a function scope.
+     * Different from `getCurrentScopeType() === 'fn'`, which only matches
+     * the immediate scope — code inside a nested `if`/`for`/`while` inside
+     * a function body still needs the function-scope context (e.g. for
+     * call-path-keyed param/ta-callsite ids).
+     */
+    isInsideFunctionScope(): boolean {
+        for (let i = this.scopeTypes.length - 1; i >= 0; i--) {
+            if (this.scopeTypes[i] === 'fn') return true;
+        }
+        return false;
+    }
+
     getCurrentScopeCount(): number {
         return this.scopeCounts.get(this.getCurrentScopeType()) || 1;
     }
