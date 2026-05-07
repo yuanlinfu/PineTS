@@ -47,7 +47,10 @@ describe('request.security_lower_tf window bounding', () => {
         // Chart window is ~42 days. With the bug (30-day buffer), the
         // secondary would load roughly 42 + 30 = ~72 daily bars. After
         // the fix it should be bounded by the chart's window, i.e. <= ~42.
-        const secLen = sec.data.close.data.length;
+        // We read openTime/closeTime — those are populated by both the
+        // slow path (full pineTS.run) and the fast path (pure-builtin
+        // shortcut), so this assertion is path-agnostic.
+        const secLen = sec.data.openTime.data.length;
         expect(secLen, `secondary daily-bar count should be bounded by chart window`).toBeLessThanOrEqual(45);
         // Sanity floor — must have actually loaded the LTF data we need.
         expect(secLen).toBeGreaterThanOrEqual(28);

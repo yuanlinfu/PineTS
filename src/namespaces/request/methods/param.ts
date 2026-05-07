@@ -41,6 +41,16 @@ export function param(context: any) {
             context.params[name][context.params[name].length - 1] = val;
         }
 
+        // Preserve the ORIGINAL source (with Series identity intact, before
+        // value extraction) so request.security_lower_tf can detect pure-
+        // builtin expressions (`close`, `[open, high, low, close, volume]`,
+        // …) and bypass running the user script in the secondary context.
+        // Stored by param-name on a side channel — the existing 2-tuple
+        // [val, name] return shape is preserved, so no other consumers of
+        // request.param care.
+        if (!context._requestParamSources) context._requestParamSources = {};
+        context._requestParamSources[name] = source;
+
         return [val, name];
     };
 }

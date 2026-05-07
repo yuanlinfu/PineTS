@@ -43,10 +43,12 @@ describe('silentInSecondary — side-effect helpers no-op in secondary contexts'
 
         const context = await pineTS.run(async (context) => {
             const { close } = context.data;
-            const { request, line, label, box, polyline } = context.pine;
-            // Pull a daily series via security_lower_tf; the user script
-            // (this one) re-runs as the secondary's body.
-            const _res = await request.security_lower_tf('BTCUSDC', 'D', close);
+            const { request, line, label, box, polyline, ta } = context.pine;
+            // Pull a daily series via security_lower_tf; we wrap close in
+            // ta.sma so the captured expression is NOT a pure builtin —
+            // that forces the slow-path secondary (full user-script
+            // execution), which is what the silencing decorator targets.
+            const _res = await request.security_lower_tf('BTCUSDC', 'D', ta.sma(close, 3));
             // These are drawing side effects — when this body runs in the
             // secondary they should all be silenced.
             line.new(0, 0, 1, 1);
@@ -83,8 +85,9 @@ describe('silentInSecondary — side-effect helpers no-op in secondary contexts'
 
         const context = await pineTS.run(async (context) => {
             const { close } = context.data;
-            const { request, plot, plotchar } = context.pine;
-            const _res = await request.security_lower_tf('BTCUSDC', 'D', close);
+            const { request, plot, plotchar, ta } = context.pine;
+            // Force slow-path secondary by wrapping close in ta.sma.
+            const _res = await request.security_lower_tf('BTCUSDC', 'D', ta.sma(close, 3));
             plot(close, 'main_plot');
             plotchar(close, 'main_plotchar');
         });
@@ -116,8 +119,9 @@ describe('silentInSecondary — side-effect helpers no-op in secondary contexts'
 
         const context = await pineTS.run(async (context) => {
             const { close } = context.data;
-            const { request, alert } = context.pine;
-            const _res = await request.security_lower_tf('BTCUSDC', 'D', close);
+            const { request, alert, ta } = context.pine;
+            // Force slow-path secondary by wrapping close in ta.sma.
+            const _res = await request.security_lower_tf('BTCUSDC', 'D', ta.sma(close, 3));
             alert.any('fire');
         });
 

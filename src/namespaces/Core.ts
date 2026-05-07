@@ -506,7 +506,7 @@ export class Core {
             }
         }
 
-        const UDT = {
+        const UDT: any = {
             new: function (...args: any[]) {
                 // Map positional args to field names, applying defaults for missing args
                 const mappedArgs: Record<string, any> = {};
@@ -549,12 +549,22 @@ export class Core {
                     }
                     // else: field remains absent (na/undefined)
                 }
-                return new PineTypeObject(mappedArgs, this.context);
+                return new PineTypeObject(mappedArgs, this.context, UDT);
             },
 
             copy: function (object: PineTypeObject) {
-                return new PineTypeObject(object.__def__, this.context);
+                return new PineTypeObject(object.__def__, this.context, UDT);
             },
+
+            // Factory metadata exposed for the request.security_lower_tf
+            // pure-builtin fast path. `_fieldDefaults` holds the ORIGINAL
+            // default-initializer expressions (e.g. the `open` Series for
+            // `float o = open`) — Series identities preserved so the
+            // detector can compare against `context.data.<builtin>`.
+            // `_definitionKeys` is the field order matching positional
+            // construction.
+            _fieldDefaults: fieldDefaults,
+            _definitionKeys: definitionKeys,
         };
         return UDT;
     }

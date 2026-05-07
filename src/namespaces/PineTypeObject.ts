@@ -3,14 +3,28 @@ export class PineTypeObject {
         return this._definition;
     }
 
-    constructor(private _definition: Record<string, string>, public context: any) {
+    /**
+     * Back-reference to the UDT factory that produced this instance.
+     * Used by `request.security_lower_tf`'s pure-builtin fast path to
+     * detect UDTs whose field defaults are all bare price builtins
+     * (e.g. `type candle { float o = open; float h = high; … }`) — when
+     * detected, the secondary's per-LTF-bar values can be synthesised
+     * directly from the candle stream without running any user script.
+     * Optional and nullable: instances created outside `Type().new` (or
+     * for legacy / direct constructions) leave this undefined and the
+     * fast path simply doesn't engage.
+     */
+    public _udt?: any;
+
+    constructor(private _definition: Record<string, string>, public context: any, _udt?: any) {
         for (let key in _definition) {
             this[key] = _definition[key];
         }
+        this._udt = _udt;
     }
 
     copy() {
-        return new PineTypeObject(this.__def__, this.context);
+        return new PineTypeObject(this.__def__, this.context, this._udt);
     }
 
     toString() {
