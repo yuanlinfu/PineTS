@@ -2,32 +2,30 @@
 // Copyright (C) 2026 Alaa-eddine KADDOURI
 
 /**
- * `request.security_lower_tf` slow-path slicing — Phase 1.
+ * `request.security_lower_tf` slow-path slicing — Phases 1 + 2.
  *
  * The transpiler emits a slice (truncated function body) for every
- * `request.security_lower_tf` call site whose top-level enclosing
- * statement is a regular declaration / expression statement (Phase 1
- * shape). At runtime, the slow path executes that slice in the
- * secondary instead of the FULL user script — which on heavy
- * indicators removes the post-call work (TA, drawings, plots) from
- * the per-LTF-bar inner loop.
+ * `request.security_lower_tf` call site whose execution path through
+ * the wrapper function does NOT cross a nested user-function or
+ * method body. The slice walker projects every statement on the
+ * execution chain that leads to the call:
  *
- * These tests verify:
- *   1. Slices are attached to the transpiled function and propagated
- *      onto the Context.
- *   2. The runtime picks up the slice and the slow path uses
- *      `runPretranspiled` instead of `run`.
- *   3. Captured LTF values match what the FULL-script slow path would
- *      have produced (correctness preservation under truncation).
- *   4. Calls nested inside if/for/function bodies fall back to the
- *      full-script slow path (no slice emitted) — Phase 2/3 territory.
+ *   - Phase 1 — call at top level. Slice = top-level prefix.
+ *   - Phase 2 — call inside if/for/while/do-while/switch/block. Slice
+ *     preserves each enclosing scope but drops sibling/post-call
+ *     statements at every nesting level (and drops the OTHER branch
+ *     of an `if`).
+ *
+ * Calls nested inside user functions / methods (Phase 3) need a
+ * synthetic-invocation strategy and are explicitly NOT sliced; the
+ * runtime falls back to today's full-script slow path.
  */
 
 import { describe, it, expect } from 'vitest';
 import { PineTS, Provider } from 'index';
 import { transpile } from '../../src/transpiler/index';
 
-describe('request.security_lower_tf slicing — Phase 1', () => {
+describe('request.security_lower_tf slicing — Phases 1 + 2', () => {
     const chartStart = new Date('2018-12-10').getTime();
     const chartEnd = new Date('2019-01-21').getTime();
 
@@ -71,37 +69,183 @@ plot(postCallEma, "post")
         expect(src).not.toMatch(/'post'/);
     });
 
-    it('does NOT attach a slice when the call is buried inside a nested function (Phase 3)', () => {
+    it('Phase 3: emits a slice when the call is inside a user function, preserving the fn definition AND the call site', () => {
         const code = `
 //@version=5
-indicator("nested-fn slice gating")
-myFn() =>
-    arr = request.security_lower_tf(syminfo.tickerid, "D", ta.sma(close, 3))
-    arr.size()
-sz = myFn()
-plot(sz)
+indicator("fn-nested slice")
+myFn(float x) =>
+    arr = request.security_lower_tf(syminfo.tickerid, "D", x)
+    arr.first()
+a = myFn(close)
+postCallEma = ta.ema(close, 50)
+plot(a, "a")
+plot(postCallEma, "post")
 `;
         const fn = transpile(code) as any;
-        // No slice expected for Phase 1 — call is inside a user function.
-        if (fn._ltfSlices) {
-            expect(Object.keys(fn._ltfSlices).length).toBe(0);
-        }
+        expect(fn._ltfSlices).toBeDefined();
+        const sliceFn = Object.values(fn._ltfSlices ?? {})[0] as Function;
+        expect(sliceFn).toBeDefined();
+        const src = sliceFn.toString();
+        // The slice MUST contain the function declaration AND the call site.
+        expect(src).toMatch(/function\s+myFn/);
+        expect(src).toMatch(/\$\.call\(myFn/);
+        expect(src).toMatch(/request\.security_lower_tf/);
+        // Post-call top-level statements MUST be dropped.
+        expect(src).not.toMatch(/glb1_postCallEma/);
+        expect(src).not.toMatch(/'post'/);
     });
 
-    it('does NOT attach a slice when the call is inside an if-block (Phase 2)', () => {
+    it('Phase 3: emits a slice when the call is inside a UDT method, preserving type def + var instance + method', () => {
         const code = `
 //@version=5
-indicator("if-block slice gating")
+indicator("method-nested slice")
+type Counter
+    int n = 0
+method tick(Counter this) =>
+    this.n += 1
+    arr = request.security_lower_tf(syminfo.tickerid, "D", this.n)
+    arr.first()
+var Counter c = Counter.new()
+a = c.tick()
+postEma = ta.ema(close, 50)
+plot(a, "a")
+plot(postEma, "postEma")
+`;
+        const fn = transpile(code) as any;
+        const sliceFn = Object.values(fn._ltfSlices ?? {})[0] as Function;
+        expect(sliceFn).toBeDefined();
+        const src = sliceFn.toString();
+        // The slice MUST contain the type def, the method, the var-instance
+        // initializer, and the dispatch.
+        expect(src).toMatch(/Counter/);
+        expect(src).toMatch(/function\s+\$M_tick/);
+        expect(src).toMatch(/initVar\(\$\.var\.glb1_c/);
+        expect(src).toMatch(/\$\.call\(\$M_tick/);
+        // Post-call statements dropped.
+        expect(src).not.toMatch(/glb1_postEma/);
+        expect(src).not.toMatch(/'postEma'/);
+    });
+
+    it('Phase 3: param names are stored with their static `pN` form (despite runtime path-prefixing)', () => {
+        const code = `
+//@version=5
+indicator("phase3 key")
+myFn(float x) =>
+    arr = request.security_lower_tf(syminfo.tickerid, "D", x)
+    arr.first()
+a = myFn(close)
+plot(a)
+`;
+        const fn = transpile(code) as any;
+        const keys = Object.keys(fn._ltfSlices ?? {});
+        expect(keys.length).toBeGreaterThan(0);
+        // Slice keys must be bare `pN` literals — the runtime
+        // strips any path prefix before lookup.
+        for (const k of keys) expect(/^p\d+$/.test(k)).toBe(true);
+    });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Phase 2: nested control-flow shapes
+    // ─────────────────────────────────────────────────────────────────────
+    it('Phase 2: emits a slice when the call is inside an if-block, preserving the cond and dropping post-call statements', () => {
+        const code = `
+//@version=5
+indicator("if-block slice")
 var int sz = 0
 if barstate.islast
     arr = request.security_lower_tf(syminfo.tickerid, "D", ta.sma(close, 3))
     sz := arr.size()
-plot(sz)
+postCallEma = ta.ema(close, 50)
+plot(sz, "sz")
+plot(postCallEma, "post")
 `;
         const fn = transpile(code) as any;
-        if (fn._ltfSlices) {
-            expect(Object.keys(fn._ltfSlices).length).toBe(0);
-        }
+        expect(fn._ltfSlices).toBeDefined();
+        const sliceFn = Object.values(fn._ltfSlices ?? {})[0] as Function;
+        expect(sliceFn).toBeDefined();
+        const src = sliceFn.toString();
+        // Slice MUST contain the call and the if-cond.
+        expect(src).toMatch(/request\.security_lower_tf/);
+        expect(src).toMatch(/barstate/); // the if-cond is preserved
+        // Slice MUST DROP the post-call assignment inside the if AND
+        // the post-call top-level statements.
+        expect(src).not.toMatch(/glb1_postCallEma/);
+        expect(src).not.toMatch(/'post'/);
+        // The `sz := arr.size()` inside the if also lives AFTER the
+        // call inside the same block, so it should be dropped too.
+        // It compiles to an assignment to $.var.glb1_sz from arr.size().
+        // Easiest check: the assignment expression `arr.size()` doesn't
+        // appear in the slice source.
+        expect(src).not.toMatch(/\.size\(\)/);
+    });
+
+    it('Phase 2: drops the OTHER branch of an `if` when the call is in then-branch only', () => {
+        const code = `
+//@version=5
+indicator("if-then slice")
+var float captured = na
+if close > open
+    arr = request.security_lower_tf(syminfo.tickerid, "D", close)
+    captured := arr.first()
+else
+    captured := -1.0
+    plot(123, "elsePlot")
+plot(captured, "cap")
+`;
+        const fn = transpile(code) as any;
+        const sliceFn = Object.values(fn._ltfSlices ?? {})[0] as Function;
+        expect(sliceFn).toBeDefined();
+        const src = sliceFn.toString();
+        expect(src).toMatch(/request\.security_lower_tf/);
+        // The else-branch's `elsePlot` literal must NOT be in the slice.
+        expect(src).not.toMatch(/'elsePlot'/);
+    });
+
+    it('Phase 2: emits a slice when the call is inside a `for` loop, preserving the loop header', () => {
+        const code = `
+//@version=5
+indicator("for-loop slice")
+var float total = 0.0
+for i = 0 to 4
+    arr = request.security_lower_tf(syminfo.tickerid, "D", close)
+    total := total + arr.size()
+plot(total, "total")
+`;
+        const fn = transpile(code) as any;
+        const sliceFn = Object.values(fn._ltfSlices ?? {})[0] as Function;
+        expect(sliceFn).toBeDefined();
+        const src = sliceFn.toString();
+        expect(src).toMatch(/request\.security_lower_tf/);
+        // Loop header / body must reach the call.
+        expect(src).toMatch(/for\s*\(/);
+        // The post-call assignment `total := total + arr.size()` must
+        // NOT be in the slice (it's after the call within the loop body).
+        expect(src).not.toMatch(/\.size\(\)/);
+        // The post-loop top-level plot must NOT be in the slice.
+        expect(src).not.toMatch(/'total'/);
+    });
+
+    it('Phase 2: emits a slice for a call nested inside if-inside-for', () => {
+        const code = `
+//@version=5
+indicator("nested control-flow slice")
+var float captured = na
+for i = 0 to 2
+    if i == 1
+        arr = request.security_lower_tf(syminfo.tickerid, "D", close)
+        captured := arr.first()
+plot(captured, "cap")
+`;
+        const fn = transpile(code) as any;
+        const sliceFn = Object.values(fn._ltfSlices ?? {})[0] as Function;
+        expect(sliceFn).toBeDefined();
+        const src = sliceFn.toString();
+        expect(src).toMatch(/request\.security_lower_tf/);
+        // Both the for-loop and the inner if must survive in the slice.
+        expect(src).toMatch(/for\s*\(/);
+        expect(src).toMatch(/if\s*\(/);
+        // The trailing `plot(captured, "cap")` must NOT be in the slice.
+        expect(src).not.toMatch(/'cap'/);
     });
 
     // ─────────────────────────────────────────────────────────────────────
@@ -192,6 +336,38 @@ plot(e2, "e2")
             (d: any) => typeof d.value === 'number' && Number.isFinite(d.value) && d.value !== 0,
         );
         expect(nonZero.length).toBeGreaterThan(0);
+    });
+
+    it('Phase 3 runtime: secondary picks up the slice for a fn-nested call (not the full script)', async () => {
+        // Inside a fn, _expression_name at runtime is `${pathId}p3`, but
+        // the slice is keyed by the bare static `p3`. The runtime hook
+        // must strip the path prefix before lookup.
+        //
+        // Use a calculated expression (not a bare builtin) so the
+        // pure-builtin fast path can't claim the call and we exercise
+        // the slow-path slice lookup.
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'W', null, chartStart, chartEnd);
+        const code = `
+//@version=5
+indicator("phase3 runtime")
+myFn(float x) =>
+    arr = request.security_lower_tf(syminfo.tickerid, "D", ta.sma(x, 3))
+    arr.first()
+a = myFn(close)
+plot(a, "a")
+`;
+        const ctx: any = await pineTS.run(code);
+        // Slice present.
+        expect(ctx._ltfTruncatedBodies).toBeDefined();
+        expect(Object.keys(ctx._ltfTruncatedBodies).length).toBeGreaterThan(0);
+        // Secondary used the slice (not full-script run).
+        const cacheKey = Object.keys(ctx.cache).find((k) => k.includes('_lower'))!;
+        const cached = ctx.cache[cacheKey];
+        expect(cached._fastPath).toBeUndefined();
+        expect(cached.pineTS).not.toBeNull();
+        const secTranspiled = (cached.pineTS as any).transpiledCode;
+        const sliceFn = Object.values(ctx._ltfTruncatedBodies)[0];
+        expect(secTranspiled).toBe(sliceFn);
     });
 
     // ─────────────────────────────────────────────────────────────────────

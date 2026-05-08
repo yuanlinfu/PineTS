@@ -397,9 +397,17 @@ export function security_lower_tf(context: any) {
                 // runs the prefix-of-statements ending at the call —
                 // skipping all post-call work the slow path used to drag
                 // along. Falls back to running the FULL user script when
-                // no slice is available (calls inside if/for/function
-                // bodies are not yet covered by Phase 1).
-                const slice = (context as any)._ltfTruncatedBodies?.[_expression_name as string];
+                // no slice is available.
+                //
+                // For fn-nested calls (Phase 3), `request.param` runs
+                // inside a function scope and the codegen prefixes the
+                // param name with `$$.id + 'pN'` — so the runtime
+                // `_expression_name` is something like `<path>p3` whereas
+                // the slice map is keyed by the bare static `pN`. Extract
+                // the trailing `pN` for the lookup.
+                const exprNameStr = typeof _expression_name === 'string' ? _expression_name : '';
+                const sliceKey = exprNameStr.match(/p\d+$/)?.[0] ?? exprNameStr;
+                const slice = (context as any)._ltfTruncatedBodies?.[sliceKey];
                 let secContext: any;
                 if (slice) {
                     secContext = await pineTS.runPretranspiled(slice);

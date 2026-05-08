@@ -2,41 +2,45 @@
 // Copyright (C) 2026 Alaa-eddine KADDOURI
 
 /**
- * LTF / HTF request slicing — Phase 1.
+ * LTF / HTF request slicing — Phases 1 + 2 + 3.
  *
  * For every `request.security_lower_tf` (and `request.security`) call
- * site in the post-transpile AST, build a "slice" — a pre-built
- * JavaScript Function whose body is the prefix of the user's code up
- * through and including the call. When the slow path of
- * `request.security_lower_tf` runs the user script in the secondary
- * context, it executes this truncated body instead of the FULL script,
- * which on a typical "calculated expression" indicator drops the bulk
- * of the per-LTF-bar work (post-call TA, math, drawing setup, plot).
+ * site in the post-transpile AST, build a "slice" — a pre-built async
+ * JavaScript Function whose body is a *path-projection* of the user's
+ * code: every statement on the execution chain that leads to the call,
+ * with sibling/post-call statements dropped at every nesting level.
  *
- * This module only handles the simple shape: the call's outer-most
- * enclosing statement is at the top level of the wrapper function. For
- * calls nested inside if/for/while/switch/function/method bodies, the
- * walker leaves no slice for that expression name, and the runtime
- * falls back to today's full-script slow path. (Phase 2/3 of the
- * proposal expand coverage to those shapes.)
+ * Coverage:
+ *   - Phase 1 — call at top level of the wrapper function.
+ *   - Phase 2 — call nested inside `if` / `for` / `while` / `do-while`
+ *     / `switch` / nested `BlockStatement` at any depth.
+ *   - Phase 3 — call inside a user-defined function (or UDT method —
+ *     methods compile to regular FunctionDeclarations). Slice
+ *     preserves the function definition with its body truncated at
+ *     the call, plus the EARLIEST top-level statement that invokes
+ *     that function. Multi-level nesting (A→B→C with the call inside
+ *     C, only B called from top level) is currently NOT handled
+ *     specially; in that case the runtime falls back to today's
+ *     full-script slow path.
  *
- * The slice is keyed by the expression-arg's `pN` identifier name —
- * the same string `request.param(value, idx, 'pN')` injects at codegen
- * and the same string the runtime resolves as `_expression_name` in
- * `request.security_lower_tf`.
+ * Slices are keyed by the static `pN` literal carried by the call's
+ * third positional argument (the same name `request.param` injects at
+ * codegen). Inside a function body, the runtime composes the actual
+ * `_expression_name` as `$$.id + 'pN'` (see commit 812eb2d for the
+ * path-prefixing fix); the runtime hook in `security_lower_tf.ts`
+ * extracts the trailing `pN` for slice-map lookup.
  */
 
 import * as astring from 'astring';
 
-/**
- * Methods on the `request` namespace whose calls trigger slicing.
- * Only `security_lower_tf` is currently wired into the runtime's
- * slice-lookup path; `security` (HTF) follows the same model and is
- * trivial to add in a later phase by extending the runtime hook.
- */
 const SLICING_TARGETS = new Set(['security_lower_tf']);
 
-/** Match `request.<target>(...)` exactly (no `await`, no chains). */
+const AST_SKIP_KEYS = new Set([
+    'type', 'loc', 'start', 'end', 'range', 'parent',
+    'leadingComments', 'trailingComments',
+]);
+
+/** Match `request.<target>(...)`. */
 function isRequestSecurityCall(node: any): boolean {
     if (!node || node.type !== 'CallExpression') return false;
     const callee = node.callee;
@@ -47,55 +51,260 @@ function isRequestSecurityCall(node: any): boolean {
 }
 
 /**
- * Keys to skip when recursing AST nodes — `parent` and back-edges are
- * sometimes added by transformer passes; loc/range are pure metadata.
- * Skipping them prevents stack overflow on cyclic graphs.
+ * Read the `pN` expression name from a request call's 3rd arg. The
+ * call's 3rd arg is the Identifier `pN` returned by `request.param`.
  */
-const AST_SKIP_KEYS = new Set(['type', 'loc', 'start', 'end', 'range', 'parent', 'leadingComments', 'trailingComments']);
+function exprNameOfCall(call: any): string | null {
+    const arg2 = call?.arguments?.[2];
+    if (arg2?.type === 'Identifier' && typeof arg2.name === 'string') return arg2.name;
+    return null;
+}
 
 /**
- * Direct-call lookup at any depth within `node` — used to test whether
- * a top-level statement contains a `request.security_lower_tf` call.
- * Returns the `pN` identifier name from the call's third positional
- * argument, or null if the call uses a non-identifier (rare; in
- * practice `request.param` always creates an identifier).
+ * Find every `request.security_lower_tf` CallExpression inside `root`,
+ * paired with the path of AST ancestors leading to it. The path
+ * starts at `root` (path[0] === root) and ends at the call node.
  */
-function findCallExpressionNames(node: any): string[] {
-    const names: string[] = [];
+function findRequestCallsWithPaths(root: any): Array<{ call: any; path: any[] }> {
+    const found: Array<{ call: any; path: any[] }> = [];
     const seen = new WeakSet<object>();
-    function visit(n: any) {
+    function walk(n: any, path: any[]): void {
         if (!n || typeof n !== 'object') return;
         if (seen.has(n)) return;
         seen.add(n);
+        const newPath = path.concat([n]);
         if (isRequestSecurityCall(n)) {
-            const arg2 = n.arguments?.[2];
-            if (arg2?.type === 'Identifier' && typeof arg2.name === 'string') {
-                names.push(arg2.name);
-            }
+            found.push({ call: n, path: newPath });
         }
         for (const key of Object.keys(n)) {
             if (AST_SKIP_KEYS.has(key)) continue;
             const v = n[key];
             if (Array.isArray(v)) {
-                for (const item of v) visit(item);
+                for (const item of v) walk(item, newPath);
             } else if (v && typeof v === 'object') {
-                visit(v);
+                walk(v, newPath);
             }
         }
     }
-    visit(node);
-    return names;
+    walk(root, []);
+    return found;
+}
+
+/** True for any user-function-like AST node (excludes the wrapper). */
+function isFunctionLike(n: any): boolean {
+    if (!n) return false;
+    return n.type === 'FunctionExpression' ||
+           n.type === 'ArrowFunctionExpression' ||
+           n.type === 'FunctionDeclaration';
 }
 
 /**
- * Build a sliced async arrow function from the wrapper's params plus a
- * prefix of its top-level statements. astring is reused (it's already
- * the main code-generator in the transpile pipeline).
+ * Slice a single AST node along the path. Reused by Phase 1, 2, and 3
+ * (Phase 3 also runs this against function-bodies).
  *
- * NOTE: shares AST nodes with the original wrapper. astring is
- * non-destructive, so this is safe — both the main code-emit and the
- * slice-emit walk independent copies of the same nodes.
+ * `path[depth]` is the node we're slicing; `path[depth+1]` is the
+ * child on the path. Return a new node with sibling/post-path content
+ * dropped. Once we leave the statement realm and enter expression-
+ * level nodes (ConditionalExpression, BinaryExpression, etc.), we
+ * preserve them whole — slicing inside an expression breaks its
+ * value.
  */
+function sliceAlongPath(node: any, path: any[], depth: number): any {
+    if (depth >= path.length - 1) return node;
+    const next = path[depth + 1];
+
+    switch (node.type) {
+        case 'BlockStatement': {
+            const idx = node.body.indexOf(next);
+            if (idx < 0) return node;
+            const newBody = node.body.slice(0, idx);
+            newBody.push(sliceAlongPath(next, path, depth + 1));
+            return { ...node, body: newBody };
+        }
+        case 'IfStatement': {
+            if (next === node.test) {
+                return { ...node, test: sliceAlongPath(next, path, depth + 1), consequent: { type: 'BlockStatement', body: [] }, alternate: null };
+            }
+            if (next === node.consequent) {
+                return { ...node, consequent: sliceAlongPath(next, path, depth + 1), alternate: null };
+            }
+            if (next === node.alternate) {
+                return { ...node, alternate: sliceAlongPath(next, path, depth + 1) };
+            }
+            return node;
+        }
+        case 'ForStatement':
+        case 'WhileStatement':
+        case 'DoWhileStatement':
+        case 'ForInStatement':
+        case 'ForOfStatement': {
+            if (next === node.body) {
+                return { ...node, body: sliceAlongPath(next, path, depth + 1) };
+            }
+            return node;
+        }
+        case 'SwitchStatement': {
+            const idx = node.cases.indexOf(next);
+            if (idx >= 0) {
+                const newCases = node.cases.slice(0, idx);
+                newCases.push(sliceAlongPath(next, path, depth + 1));
+                return { ...node, cases: newCases };
+            }
+            return node;
+        }
+        case 'SwitchCase': {
+            const idx = node.consequent.indexOf(next);
+            if (idx >= 0) {
+                const newCons = node.consequent.slice(0, idx);
+                newCons.push(sliceAlongPath(next, path, depth + 1));
+                return { ...node, consequent: newCons };
+            }
+            return node;
+        }
+        // FunctionDeclaration / FunctionExpression / ArrowFunctionExpression
+        // — slice their body when the path enters it.
+        case 'FunctionDeclaration':
+        case 'FunctionExpression':
+        case 'ArrowFunctionExpression': {
+            if (next === node.body) {
+                return { ...node, body: sliceAlongPath(next, path, depth + 1) };
+            }
+            return node;
+        }
+        default:
+            return node;
+    }
+}
+
+/**
+ * Test if a CallExpression is `$.call(fnRef, ...)` and return the
+ * fnRef Identifier name. Used to locate top-level invocations of a
+ * given user function. Returns null if the node is not a `$.call`
+ * or its first arg is not an Identifier.
+ */
+function dollarCallTarget(node: any): string | null {
+    if (!node || node.type !== 'CallExpression') return null;
+    const callee = node.callee;
+    if (!callee || callee.type !== 'MemberExpression' || callee.computed) return null;
+    if (callee.object?.type !== 'Identifier' || callee.object.name !== '$') return null;
+    if (callee.property?.type !== 'Identifier' || callee.property.name !== 'call') return null;
+    const arg0 = node.arguments?.[0];
+    if (arg0?.type === 'Identifier' && typeof arg0.name === 'string') return arg0.name;
+    return null;
+}
+
+/**
+ * Find the earliest top-level statement in `wrapperBody.body` whose
+ * subtree contains a `$.call(<fnName>, ...)` invocation. Returns the
+ * statement index, or -1 if no invocation is found.
+ *
+ * Skips the function declaration itself (a fn calling itself wouldn't
+ * count — and would put us in recursion territory).
+ */
+function findEarliestInvocationIdx(wrapperBody: any, fnName: string, fnDeclNode: any): number {
+    const stmts: any[] = wrapperBody.body || [];
+    for (let i = 0; i < stmts.length; i++) {
+        const stmt = stmts[i];
+        if (stmt === fnDeclNode) continue;
+        if (subtreeContainsDollarCall(stmt, fnName)) return i;
+    }
+    return -1;
+}
+
+function subtreeContainsDollarCall(root: any, fnName: string): boolean {
+    let found = false;
+    const seen = new WeakSet<object>();
+    function walk(n: any) {
+        if (found || !n || typeof n !== 'object') return;
+        if (seen.has(n)) return;
+        seen.add(n);
+        if (dollarCallTarget(n) === fnName) {
+            found = true;
+            return;
+        }
+        for (const key of Object.keys(n)) {
+            if (AST_SKIP_KEYS.has(key)) continue;
+            const v = n[key];
+            if (Array.isArray(v)) {
+                for (const item of v) walk(item);
+            } else if (v && typeof v === 'object') {
+                walk(v);
+            }
+        }
+    }
+    walk(root);
+    return found;
+}
+
+/**
+ * Build a Phase 3 slice for a request call inside a function body.
+ *
+ * Strategy:
+ *   1. The call's path = [wrapperBody, …, fnDecl, fnDecl.body, …, call].
+ *   2. Slice fnDecl.body at the call (using sliceAlongPath rooted at
+ *      fnDecl).
+ *   3. Find the earliest top-level statement that invokes fnDecl via
+ *      `$.call(fnDecl.id, …)`. If none, bail (defensive — shouldn't
+ *      happen in practice).
+ *   4. Build the wrapper-body slice: keep statements [0..invIdx]
+ *      inclusive, with fnDecl swapped for its sliced version. The
+ *      kept statements include any `var` instance initializers the
+ *      method needs (e.g. `var Counter c = Counter.new()`), preserving
+ *      the var-once semantics observed in TV (Probe 3).
+ *
+ * Returns the sliced wrapper.body's statement list, or null if the
+ * shape isn't supported (multi-level fn nesting, recursive fn,
+ * invocation buried inside an expression that we can't safely
+ * truncate, etc.). Falling back is always safe — the runtime uses
+ * the legacy full-script slow path when no slice is registered.
+ */
+function buildPhase3SliceStmts(wrapperBody: any, path: any[]): any[] | null {
+    // path[0] === wrapperBody. Find the FIRST FunctionDeclaration
+    // on the path — that's the outer-most fn body the call lives in.
+    let fnIdx = -1;
+    for (let i = 1; i < path.length; i++) {
+        if (isFunctionLike(path[i])) { fnIdx = i; break; }
+    }
+    if (fnIdx < 0) return null;
+    const fnNode = path[fnIdx];
+
+    // Phase 3 v1 — only handle single-level fn nesting. If there's a
+    // SECOND function-like node deeper in the path, bail.
+    for (let i = fnIdx + 1; i < path.length; i++) {
+        if (isFunctionLike(path[i])) return null;
+    }
+
+    // Only handle FunctionDeclarations — anonymous fn-expressions
+    // can't be looked up by name in the call graph.
+    if (fnNode.type !== 'FunctionDeclaration' || !fnNode.id?.name) return null;
+    const fnName = fnNode.id.name;
+
+    // Slice the function's body at the call.
+    const fnSlicePath = path.slice(fnIdx); // [fnDecl, fnDecl.body?, …, call]
+    const slicedFn = sliceAlongPath(fnNode, fnSlicePath, 0);
+
+    // Find the earliest top-level invocation of this function.
+    const invIdx = findEarliestInvocationIdx(wrapperBody, fnName, fnNode);
+    if (invIdx < 0) return null;
+
+    // Build the wrapper.body slice: keep [0..invIdx] inclusive, with
+    // fnNode replaced by slicedFn. The fn declaration may sit AFTER
+    // the invocation in source order — when the fn is hoisted by the
+    // pineToJS step. Handle either case:
+    const stmts: any[] = wrapperBody.body || [];
+    const fnDeclIdx = stmts.indexOf(fnNode);
+    if (fnDeclIdx < 0) return null;
+
+    const result: any[] = [];
+    const lastIdx = Math.max(invIdx, fnDeclIdx);
+    for (let i = 0; i <= lastIdx; i++) {
+        const s = stmts[i];
+        result.push(s === fnNode ? slicedFn : s);
+    }
+    return result;
+}
+
+/** Wrap a sliced statement list back into an async arrow Function. */
 function buildSliceFunction(wrapperFn: any, slicedStmts: any[]): Function {
     const slicedAst = {
         type: 'Program',
@@ -115,34 +324,9 @@ function buildSliceFunction(wrapperFn: any, slicedStmts: any[]): Function {
     return new Function('', wrapped)();
 }
 
-/**
- * Walk the wrapper function's top-level statement list. For each
- * statement that contains a `request.security_lower_tf` call (at any
- * depth within the statement, but with the statement itself sitting
- * directly under the wrapper's body), build a slice whose body is the
- * prefix [0..i] inclusive. Returns a Map keyed by the call's `pN`
- * expression name → slice Function.
- *
- * If multiple calls share the same top-level statement (rare but
- * legal: e.g. `[a, b] = [request.security_lower_tf(...), ...]`), each
- * call's expression name maps to the SAME slice — they share the same
- * prefix and run side-by-side in the secondary.
- *
- * Phase 1 explicitly does NOT slice when the call's enclosing
- * top-level statement is a function declaration / assignment whose
- * body contains the call (the runtime needs a synthetic invocation,
- * which we add in Phase 3) or when the call lives inside a control-
- * flow block at the top level (Phase 2). In those shapes, the walker
- * still emits a slice — but the runtime callsite check (in
- * `security_lower_tf.ts`) chooses to use it only when the call
- * actually fires from a path the slice covers. For safety the runtime
- * unconditionally falls back to the full-script slow path when
- * `_ltfTruncatedBodies[name]` is missing.
- */
 export function buildLtfSlices(ast: any): Record<string, Function> {
     const slices: Record<string, Function> = {};
 
-    // Locate the wrapper function: Program → ExpressionStatement → ArrowFunctionExpression.
     if (!ast || ast.type !== 'Program' || !Array.isArray(ast.body) || ast.body.length === 0) {
         return slices;
     }
@@ -158,102 +342,29 @@ export function buildLtfSlices(ast: any): Record<string, Function> {
     }
     if (!wrapperFn || wrapperFn.body?.type !== 'BlockStatement') return slices;
 
-    const topStmts: any[] = wrapperFn.body.body;
+    const calls = findRequestCallsWithPaths(wrapperFn.body);
 
-    for (let i = 0; i < topStmts.length; i++) {
-        const stmt = topStmts[i];
+    for (const { call, path } of calls) {
+        const exprName = exprNameOfCall(call);
+        if (!exprName) continue;
+        if (exprName in slices) continue;
 
-        // Skip statements that are themselves block scopes whose call lives
-        // strictly nested (not directly handled in Phase 1). We still
-        // detect the call so we know NOT to confuse a later top-level
-        // call with this one — but we don't emit a slice for it.
-        const exprNames = findCallExpressionNames(stmt);
-        if (exprNames.length === 0) continue;
-
-        // Phase 1 gate: only build a slice when the call sits in a shape
-        // where the secondary's bar loop would naturally fire it once
-        // per LTF bar — i.e. the statement is NOT a user-function/method
-        // declaration whose body needs an explicit invocation. In
-        // practice for typed transpiled code, call-bearing top-level
-        // statements are VariableDeclarations (`const temp_N = await
-        // request.security_lower_tf(...)`), ExpressionStatements (await
-        // …), or AssignmentExpressions inside ExpressionStatement.
-        // FunctionDeclarations / ArrowFunctionExpressions assigned to
-        // identifiers are excluded.
-        if (!isPhase1CompatibleStatement(stmt)) continue;
-
-        const slicedStmts = topStmts.slice(0, i + 1);
-        const sliceFn = buildSliceFunction(wrapperFn, slicedStmts);
-        for (const name of exprNames) {
-            if (!(name in slices)) slices[name] = sliceFn;
+        // Phase 1 + 2 path: the request call is reachable without
+        // crossing a nested user function.
+        const crossesFn = path.some((n) => isFunctionLike(n));
+        let stmts: any[] | null = null;
+        if (!crossesFn) {
+            const slicedRoot = sliceAlongPath(wrapperFn.body, path, 0);
+            stmts = (slicedRoot && slicedRoot.body) ? slicedRoot.body : [];
+        } else {
+            // Phase 3 path: call lives inside a function body.
+            stmts = buildPhase3SliceStmts(wrapperFn.body, path);
         }
+        if (!stmts || stmts.length === 0) continue;
+
+        const sliceFn = buildSliceFunction(wrapperFn, stmts);
+        slices[exprName] = sliceFn;
     }
 
     return slices;
-}
-
-/**
- * Phase 1 acceptance: the statement is something that, when executed
- * top-down per bar, will fire the contained `request.*` call without
- * needing an extra invocation. Practical shapes from the codegen:
- *   - VariableDeclaration with an `await` initializer
- *   - ExpressionStatement with an `await` expression
- *   - AssignmentExpression inside an ExpressionStatement
- *
- * Excluded for Phase 1: FunctionDeclarations, ClassDeclarations,
- * IfStatement / ForStatement / SwitchStatement / WhileStatement
- * (Phase 2), and any statement whose call lives strictly inside a
- * nested function body (Phase 3).
- */
-function isPhase1CompatibleStatement(stmt: any): boolean {
-    if (!stmt) return false;
-    if (stmt.type === 'FunctionDeclaration') return false;
-    if (stmt.type === 'ClassDeclaration') return false;
-    // Reject if the call is buried inside a nested FunctionExpression or
-    // ArrowFunctionExpression — those need an invocation, deferred to
-    // Phase 3.
-    if (callIsInsideNestedFunction(stmt)) return false;
-    // Reject control-flow blocks for now — Phase 2 handles them.
-    if (stmt.type === 'IfStatement' || stmt.type === 'ForStatement' ||
-        stmt.type === 'ForInStatement' || stmt.type === 'ForOfStatement' ||
-        stmt.type === 'WhileStatement' || stmt.type === 'DoWhileStatement' ||
-        stmt.type === 'SwitchStatement' || stmt.type === 'TryStatement' ||
-        stmt.type === 'BlockStatement') return false;
-    return true;
-}
-
-/**
- * Returns true if a `request.security_lower_tf` call exists strictly
- * inside a nested function/arrow expression within `stmt` (i.e. it
- * would NOT fire on a per-bar pass through `stmt`). Direct calls
- * inside `stmt`'s own AssignmentExpression / VariableDeclarator init
- * don't count as nested.
- */
-function callIsInsideNestedFunction(stmt: any): boolean {
-    let foundNested = false;
-    const seen = new WeakSet<object>();
-    function visit(n: any, insideFn: boolean) {
-        if (foundNested || !n || typeof n !== 'object') return;
-        if (seen.has(n)) return;
-        seen.add(n);
-        const isFnNode = n.type === 'FunctionExpression' || n.type === 'ArrowFunctionExpression' ||
-                         n.type === 'FunctionDeclaration';
-        if (isRequestSecurityCall(n) && insideFn) {
-            foundNested = true;
-            return;
-        }
-        for (const key of Object.keys(n)) {
-            if (AST_SKIP_KEYS.has(key)) continue;
-            const v = n[key];
-            if (Array.isArray(v)) {
-                for (const item of v) visit(item, insideFn || isFnNode);
-            } else if (v && typeof v === 'object') {
-                visit(v, insideFn || isFnNode);
-            }
-        }
-    }
-    // Top-level `stmt` itself is not a function body; treat its direct
-    // children as "outside" any function.
-    visit(stmt, false);
-    return foundNested;
 }
