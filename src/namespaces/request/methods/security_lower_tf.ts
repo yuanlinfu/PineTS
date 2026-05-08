@@ -369,7 +369,7 @@ export function security_lower_tf(context: any) {
                     _fastPathArgs: { builtinExpr },
                 };
             } else {
-                // ── Slow path: run the full user script in a secondary ──
+                // ── Slow path: run the user script in a secondary ──
                 // For request.security_lower_tf the secondary's data window
                 // is bounded by the chart's own window — every LTF bar that
                 // contributes to a chart bar falls inside that chart bar's
@@ -392,7 +392,20 @@ export function security_lower_tf(context: any) {
                 const pineTS = new PineTS(context.source, _symbol, _timeframe, _calc_bars_count, adjustedSDate, secEDate);
                 pineTS.markAsSecondary();
 
-                const secContext = await pineTS.run(context.pineTSCode);
+                // Truncated-slice slow path: when the transpiler emitted a
+                // slice for THIS call's expression name, the secondary
+                // runs the prefix-of-statements ending at the call —
+                // skipping all post-call work the slow path used to drag
+                // along. Falls back to running the FULL user script when
+                // no slice is available (calls inside if/for/function
+                // bodies are not yet covered by Phase 1).
+                const slice = (context as any)._ltfTruncatedBodies?.[_expression_name as string];
+                let secContext: any;
+                if (slice) {
+                    secContext = await pineTS.runPretranspiled(slice);
+                } else {
+                    secContext = await pineTS.run(context.pineTSCode);
+                }
                 context.cache[cacheKey] = { pineTS, context: secContext, dataVersion: context.dataVersion };
             }
         }

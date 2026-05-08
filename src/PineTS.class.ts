@@ -353,12 +353,43 @@ export class PineTS {
      * Run the script completely and return the final context (backward compatible behavior)
      * @private
      */
+    /**
+     * Run an already-transpiled PineTS function in this instance — no
+     * additional transpile/parse pass. Used by `request.security_lower_tf`'s
+     * slow path to execute the slice produced at primary-transpile time
+     * (a truncated body containing only the prefix up to the call). The
+     * caller is responsible for ensuring `transpiledFn` was produced by
+     * this transpiler against the same source — calling this with an
+     * arbitrary function is unsafe.
+     */
+    public async runPretranspiled(transpiledFn: Function, inputs: Record<string, any> = {}, periods?: number): Promise<Context> {
+        await this.ready();
+        if (!periods) periods = this.data.length;
+
+        const context = this._initializeContext(null as any, inputs, this._isSecondaryContext);
+        this._transpiledCode = transpiledFn;
+        // Preserve slice attribution on the context so any nested LTF
+        // request inside the slice can keep using the same map.
+        const slices = (transpiledFn as any)._ltfSlices;
+        if (slices) (context as any)._ltfTruncatedBodies = slices;
+
+        await this._executeIterations(context, this._transpiledCode, this.data.length - periods, this.data.length);
+
+        return context;
+    }
+
     private async _runComplete(pineTSCode: Function | String, inputs: Record<string, any>, periods?: number): Promise<Context> {
         await this.ready();
         if (!periods) periods = this.data.length;
 
         const context = this._initializeContext(pineTSCode, inputs, this._isSecondaryContext);
         this._transpiledCode = this._transpileCode(pineTSCode);
+        // Propagate transpile-time slices (one per request.security_lower_tf
+        // call site) onto the Context so the slow path of the LTF runtime
+        // can pick the right truncated body to run in the secondary
+        // instead of the FULL user script.
+        const slices = (this._transpiledCode as any)._ltfSlices;
+        if (slices) (context as any)._ltfTruncatedBodies = slices;
 
         await this._executeIterations(context, this._transpiledCode, this.data.length - periods, this.data.length);
 
@@ -383,6 +414,8 @@ export class PineTS {
 
         const context = this._initializeContext(pineTSCode, inputs, this._isSecondaryContext);
         this._transpiledCode = this._transpileCode(pineTSCode);
+        const slices = (this._transpiledCode as any)._ltfSlices;
+        if (slices) (context as any)._ltfTruncatedBodies = slices;
 
         const startIdx = this.data.length - periods;
         let processedUpToIdx = startIdx; // Track what we've fully processed
