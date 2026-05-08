@@ -4,6 +4,7 @@ import { Series } from '../../Series';
 import { PolylineObject } from './PolylineObject';
 import { ChartPointObject } from '../chart/ChartPointObject';
 import { NAHelper } from '../Core';
+import { silentInSecondary } from '../silentInSecondary';
 
 export class PolylineHelper {
     private _polylines: PolylineObject[] = [];
@@ -82,6 +83,7 @@ export class PolylineHelper {
     //   1. A single options object: polyline.new({points: pts, curved: true, ...})
     //   2. Points + options object: polyline.new(pts, {curved: true, ...})
     //   3. Positional arguments: polyline.new(pts, true, false, ...)
+    @silentInSecondary
     new(...args: any[]): PolylineObject {
         let points: any;
         let curved: any = false;
@@ -195,6 +197,7 @@ export class PolylineHelper {
     }
 
     // polyline.delete(id) → void
+    @silentInSecondary
     delete(id: PolylineObject): void {
         if (id) id._deleted = true;
     }

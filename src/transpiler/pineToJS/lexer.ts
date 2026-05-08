@@ -161,6 +161,20 @@ export class Lexer {
         // Convert spaces to indent levels (4 spaces = 1 level)
         indent += Math.floor(spaceCount / 4);
 
+        // Pine allows binary-operator (and comma / ternary `:` / logical
+        // and|or) line continuation. The continuation line is typically
+        // visually aligned past the operand of the previous line, which
+        // looks like a deeper indent — but it must NOT push a new block
+        // onto the indent stack. Without this guard, the lexer emits an
+        // INDENT for the continuation line and a matching DEDENT when
+        // the next real statement returns to the original block indent;
+        // the block parser sees that DEDENT and prematurely closes the
+        // surrounding function/if/for body, dropping subsequent
+        // statements (which then reference now-out-of-scope parameters).
+        if (this.isContinuationFromPrevToken()) {
+            return;
+        }
+
         const currentIndent = this.indentStack[this.indentStack.length - 1];
 
         // Increased indentation - emit INDENT
@@ -181,6 +195,31 @@ export class Lexer {
             }
         }
         // Same indentation - no INDENT/DEDENT
+    }
+
+    /**
+     * True when the most recently emitted token (skipping NEWLINE / COMMENT
+     * — those are layout, not content) is a token that requires a right-
+     * hand-side and therefore implies the next non-blank line is a
+     * continuation, not a new block. Mirrors the set the parser's
+     * `peekOperatorEx` already crosses NEWLINE for.
+     */
+    private isContinuationFromPrevToken(): boolean {
+        for (let i = this.tokens.length - 1; i >= 0; i--) {
+            const t = this.tokens[i];
+            if (t.type === TokenType.NEWLINE || t.type === TokenType.COMMENT) continue;
+            if (t.type === TokenType.OPERATOR) {
+                // `=>` introduces a new block (arrow function / method body),
+                // not a continuation — the next indent IS a real INDENT.
+                if (t.value === '=>') return false;
+                return true;
+            }
+            if (t.type === TokenType.COMMA) return true;
+            if (t.type === TokenType.COLON) return true;
+            if (t.type === TokenType.KEYWORD && (t.value === 'and' || t.value === 'or')) return true;
+            return false;
+        }
+        return false;
     }
 
     // Read comment

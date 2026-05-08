@@ -2,6 +2,7 @@
 
 import { Series } from '../../Series';
 import { TableObject } from './TableObject';
+import { silentInSecondary } from '../silentInSecondary';
 
 export class TableHelper {
     private _tables: TableObject[] = [];
@@ -48,6 +49,7 @@ export class TableHelper {
 
     // ── table.new ──────────────────────────────────────────────
 
+    @silentInSecondary
     new(...args: any[]): TableObject {
         let position: any = 'top_right';
         let columns: any = 1;
@@ -125,6 +127,7 @@ export class TableHelper {
 
     // ── table.cell ─────────────────────────────────────────────
 
+    @silentInSecondary
     cell(...args: any[]): void {
         let table_id: any;
         let column: any;
@@ -207,12 +210,14 @@ export class TableHelper {
 
     // ── table.delete ───────────────────────────────────────────
 
+    @silentInSecondary
     delete(id: TableObject): void {
         if (id) id._deleted = true;
     }
 
     // ── table.clear ────────────────────────────────────────────
 
+    @silentInSecondary
     clear(...args: any[]): void {
         let table_id: any;
         let start_column: any;
@@ -257,6 +262,7 @@ export class TableHelper {
 
     // ── table.merge_cells ──────────────────────────────────────
 
+    @silentInSecondary
     merge_cells(...args: any[]): void {
         let table_id: any;
         let start_column: any;
@@ -308,48 +314,59 @@ export class TableHelper {
 
     // ── Cell setter methods ────────────────────────────────────
 
+    @silentInSecondary
     cell_set_text(table_id: any, column: any, row: any, text: any): void {
         this._setCellProp(table_id, column, row, 'text', text, true);
     }
 
+    @silentInSecondary
     cell_set_bgcolor(table_id: any, column: any, row: any, bgcolor: any): void {
         this._setCellProp(table_id, column, row, 'bgcolor', bgcolor);
     }
 
+    @silentInSecondary
     cell_set_text_color(table_id: any, column: any, row: any, text_color: any): void {
         this._setCellProp(table_id, column, row, 'text_color', text_color);
     }
 
+    @silentInSecondary
     cell_set_text_size(table_id: any, column: any, row: any, text_size: any): void {
         this._setCellProp(table_id, column, row, 'text_size', text_size);
     }
 
+    @silentInSecondary
     cell_set_height(table_id: any, column: any, row: any, height: any): void {
         this._setCellProp(table_id, column, row, 'height', height);
     }
 
+    @silentInSecondary
     cell_set_width(table_id: any, column: any, row: any, width: any): void {
         this._setCellProp(table_id, column, row, 'width', width);
     }
 
+    @silentInSecondary
     cell_set_tooltip(table_id: any, column: any, row: any, tooltip: any): void {
         this._setCellProp(table_id, column, row, 'tooltip', tooltip, true);
     }
 
+    @silentInSecondary
     cell_set_text_halign(table_id: any, column: any, row: any, text_halign: any): void {
         this._setCellProp(table_id, column, row, 'text_halign', text_halign);
     }
 
+    @silentInSecondary
     cell_set_text_valign(table_id: any, column: any, row: any, text_valign: any): void {
         this._setCellProp(table_id, column, row, 'text_valign', text_valign);
     }
 
+    @silentInSecondary
     cell_set_text_font_family(table_id: any, column: any, row: any, text_font_family: any): void {
         this._setCellProp(table_id, column, row, 'text_font_family', text_font_family);
     }
 
     // ── Table setter methods ───────────────────────────────────
 
+    @silentInSecondary
     set_position(table_id: any, position: any): void {
         const tbl = this._resolve(table_id) as TableObject;
         if (!tbl || tbl._deleted) return;
@@ -357,6 +374,7 @@ export class TableHelper {
         this.syncToPlot();
     }
 
+    @silentInSecondary
     set_bgcolor(table_id: any, bgcolor: any): void {
         const tbl = this._resolve(table_id) as TableObject;
         if (!tbl || tbl._deleted) return;
@@ -364,6 +382,7 @@ export class TableHelper {
         this.syncToPlot();
     }
 
+    @silentInSecondary
     set_border_color(table_id: any, border_color: any): void {
         const tbl = this._resolve(table_id) as TableObject;
         if (!tbl || tbl._deleted) return;
@@ -371,6 +390,7 @@ export class TableHelper {
         this.syncToPlot();
     }
 
+    @silentInSecondary
     set_border_width(table_id: any, border_width: any): void {
         const tbl = this._resolve(table_id) as TableObject;
         if (!tbl || tbl._deleted) return;
@@ -378,6 +398,7 @@ export class TableHelper {
         this.syncToPlot();
     }
 
+    @silentInSecondary
     set_frame_color(table_id: any, frame_color: any): void {
         const tbl = this._resolve(table_id) as TableObject;
         if (!tbl || tbl._deleted) return;
@@ -385,6 +406,7 @@ export class TableHelper {
         this.syncToPlot();
     }
 
+    @silentInSecondary
     set_frame_width(table_id: any, frame_width: any): void {
         const tbl = this._resolve(table_id) as TableObject;
         if (!tbl || tbl._deleted) return;

@@ -1,6 +1,7 @@
 import type { BackgroundColorOptions, BarColorOptions, FillOptions, PlotArrowOptions, PlotBarOptions, PlotCandleOptions, PlotOptions, PlotCharOptions, PlotShapeOptions, HlineOptions } from '../types/PineTypes';
 import { Series } from '../Series';
 import { parseArgsForPineParams, extractCallsiteId } from './utils';
+import { silentInSecondary } from './silentInSecondary';
 
 //prettier-ignore
 const PLOT_SIGNATURE = [
@@ -205,6 +206,7 @@ export class PlotHelper {
     }
 
     //in the current implementation, plot functions are only used to collect data for the plots array and map it to the market data
+    @silentInSecondary
     plotchar(...args) {
         const callsiteId = extractCallsiteId(args);
         const _parsed = parseArgsForPineParams<PlotCharOptions>(args, PLOTCHAR_SIGNATURE, PLOTCHAR_ARGS_TYPES);
@@ -236,6 +238,7 @@ export class PlotHelper {
 
     //this will map to plot() - see README.md for more details
 
+    @silentInSecondary
     any(...args) {
         const callsiteId = extractCallsiteId(args);
         const _parsed = parseArgsForPineParams<PlotOptions>(args, PLOT_SIGNATURE, PLOT_ARGS_TYPES);
@@ -275,6 +278,7 @@ export class PlotHelper {
         });
         return this.context.plots[plotKey];
     }
+    @silentInSecondary
     plotshape(...args) {
         const callsiteId = extractCallsiteId(args);
         const _parsed = parseArgsForPineParams<PlotShapeOptions>(args, PLOT_SHAPE_SIGNATURE, PLOT_SHAPE_ARGS_TYPES);
@@ -313,6 +317,7 @@ export class PlotHelper {
         return this.context.plots[plotKey];
     }
 
+    @silentInSecondary
     plotarrow(...args) {
         const callsiteId = extractCallsiteId(args);
         const _parsed = parseArgsForPineParams<PlotArrowOptions>(args, PLOT_ARROW_SIGNATURE, PLOT_ARROW_ARGS_TYPES);
@@ -346,6 +351,7 @@ export class PlotHelper {
         return this.context.plots[plotKey];
     }
 
+    @silentInSecondary
     plotbar(...args) {
         const callsiteId = extractCallsiteId(args);
         const _parsed = parseArgsForPineParams<PlotBarOptions>(args, PLOTBAR_SIGNATURE, PLOTBAR_ARGS_TYPES);
@@ -368,6 +374,7 @@ export class PlotHelper {
         });
     }
 
+    @silentInSecondary
     plotcandle(...args) {
         const callsiteId = extractCallsiteId(args);
         const _parsed = parseArgsForPineParams<PlotCandleOptions>(args, PLOTCANDLE_SIGNATURE, PLOTCANDLE_ARGS_TYPES);
@@ -391,6 +398,7 @@ export class PlotHelper {
         return this.context.plots[plotKey];
     }
 
+    @silentInSecondary
     bgcolor(...args) {
         const callsiteId = extractCallsiteId(args);
         const _parsed = parseArgsForPineParams<BackgroundColorOptions>(args, BGCOLOR_SIGNATURE, BGCOLOR_ARGS_TYPES);
@@ -410,6 +418,7 @@ export class PlotHelper {
             options: { color: options.color },
         });
     }
+    @silentInSecondary
     barcolor(...args) {
         const callsiteId = extractCallsiteId(args);
         const _parsed = parseArgsForPineParams<BarColorOptions>(args, BGCOLOR_SIGNATURE, BGCOLOR_ARGS_TYPES);
@@ -449,6 +458,7 @@ export class HlineHelper {
     }
 
     //this will map to hline()
+    @silentInSecondary
     any(...args) {
         // Extract transpiler-injected callsite ID and forward to plot.any
         const callsiteId = extractCallsiteId(args);
@@ -467,6 +477,7 @@ export class FillHelper {
     param(source: any, index: number = 0, name?: string) {
         return Series.from(source).get(index);
     }
+    @silentInSecondary
     any(...args) {
         const callsiteId = extractCallsiteId(args);
 

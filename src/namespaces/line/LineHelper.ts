@@ -5,6 +5,7 @@ import { parseArgsForPineParams } from '../utils';
 import { LineObject } from './LineObject';
 import { ChartPointObject } from '../chart/ChartPointObject';
 import { NAHelper } from '../Core';
+import { silentInSecondary } from '../silentInSecondary';
 
 //prettier-ignore
 const LINE_NEW_SIGNATURES = [
@@ -66,11 +67,17 @@ export class LineHelper {
     }
 
     private _resolvePoint(point: ChartPointObject): { x: number; xloc: string } {
-        if (point.index !== undefined) {
-            return { x: point.index, xloc: 'bi' };
-        } else if (point.time !== undefined) {
-            return { x: point.time, xloc: 'bt' };
-        }
+        // Treat NaN as "not provided" so `chart.point.new(time, na, price)`
+        // (idiomatic in TV-published indicators — e.g. SMC's drawStructure)
+        // correctly resolves to a time-based point. Without the NaN check,
+        // `point.index !== undefined` is true for NaN and the helper
+        // returns x = NaN, leaving every line/box with x1=NaN/x2=NaN.
+        const hasIndex = point.index !== undefined &&
+            !(typeof point.index === 'number' && isNaN(point.index));
+        const hasTime = point.time !== undefined &&
+            !(typeof point.time === 'number' && isNaN(point.time));
+        if (hasIndex) return { x: point.index!, xloc: 'bi' };
+        if (hasTime) return { x: point.time!, xloc: 'bt' };
         return { x: 0, xloc: 'bi' };
     }
 
@@ -144,6 +151,7 @@ export class LineHelper {
     // Supports two signatures:
     //   line.new(x1, y1, x2, y2, xloc, extend, color, style, width, force_overlay)
     //   line.new(first_point, second_point, xloc, extend, color, style, width, force_overlay)
+    @silentInSecondary
     new(...args: any[]): LineObject {
         const parsed = parseArgsForPineParams<any>(args, LINE_NEW_SIGNATURES, LINE_NEW_ARGS_TYPES);
 
@@ -203,22 +211,27 @@ export class LineHelper {
 
     // --- Setter methods ---
 
+    @silentInSecondary
     set_x1(id: LineObject, x: number): void {
         if (id && !id._deleted) id.x1 = this._resolve(x);
     }
 
+    @silentInSecondary
     set_y1(id: LineObject, y: number): void {
         if (id && !id._deleted) id.y1 = this._resolve(y);
     }
 
+    @silentInSecondary
     set_x2(id: LineObject, x: number): void {
         if (id && !id._deleted) id.x2 = this._resolve(x);
     }
 
+    @silentInSecondary
     set_y2(id: LineObject, y: number): void {
         if (id && !id._deleted) id.y2 = this._resolve(y);
     }
 
+    @silentInSecondary
     set_xy1(id: LineObject, x: number, y: number): void {
         if (id && !id._deleted) {
             id.x1 = this._resolve(x);
@@ -226,6 +239,7 @@ export class LineHelper {
         }
     }
 
+    @silentInSecondary
     set_xy2(id: LineObject, x: number, y: number): void {
         if (id && !id._deleted) {
             id.x2 = this._resolve(x);
@@ -233,22 +247,27 @@ export class LineHelper {
         }
     }
 
+    @silentInSecondary
     set_color(id: LineObject, color: string): void {
         if (id && !id._deleted) id.color = this._resolve(color);
     }
 
+    @silentInSecondary
     set_width(id: LineObject, width: number): void {
         if (id && !id._deleted) id.width = this._resolve(width) || 1;
     }
 
+    @silentInSecondary
     set_style(id: LineObject, style: string): void {
         if (id && !id._deleted) id.style = this._resolve(style);
     }
 
+    @silentInSecondary
     set_extend(id: LineObject, extend: string): void {
         if (id && !id._deleted) id.extend = this._resolve(extend);
     }
 
+    @silentInSecondary
     set_xloc(id: LineObject, x1: number, x2: number, xloc: string): void {
         if (id && !id._deleted) {
             id.x1 = x1;
@@ -257,6 +276,7 @@ export class LineHelper {
         }
     }
 
+    @silentInSecondary
     set_first_point(id: LineObject, point: ChartPointObject): void {
         if (id && !id._deleted && point) {
             const r = this._resolvePoint(point);
@@ -266,6 +286,7 @@ export class LineHelper {
         }
     }
 
+    @silentInSecondary
     set_second_point(id: LineObject, point: ChartPointObject): void {
         if (id && !id._deleted && point) {
             const r = this._resolvePoint(point);
@@ -305,6 +326,7 @@ export class LineHelper {
 
     // --- Management methods ---
 
+    @silentInSecondary
     copy(id: LineObject): LineObject | undefined {
         if (!id) return undefined;
         const ln = id.copy();
@@ -316,6 +338,7 @@ export class LineHelper {
         return ln;
     }
 
+    @silentInSecondary
     delete(id: LineObject): void {
         if (id) id._deleted = true;
     }

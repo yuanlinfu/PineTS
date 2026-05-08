@@ -79,6 +79,17 @@ export function injectImplicitImports(ast: any): void {
                 // Nested declarations shadow global ones, so that's fine.
                 // If we inject `const open = ...` at top level, it might conflict if `open` is already declared at top level.
                 // So we scan top level statements for declarations.
+                //
+                // Walk default-value expressions in params so identifiers that
+                // appear ONLY in defaults (e.g. `myFn(color bg = na) =>`) still
+                // register as used. Otherwise the implicit destructure misses
+                // them and JS throws "ReferenceError: na is not defined" when
+                // the default fires at a call site that omitted the arg.
+                for (const p of node.params) {
+                    if (p && p.type === 'AssignmentPattern' && p.right) {
+                        c(p.right, state);
+                    }
+                }
                 c(node.body, state);
             },
             Identifier(node: any, state: any, c: any) {

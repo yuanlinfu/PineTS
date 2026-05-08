@@ -212,7 +212,18 @@ export class Context {
                 return _this.data.close.length - 1;
             },
             get last_bar_time() {
-                return _this.data.openTime.get(_this.data.openTime.length - 1);
+                // TV semantics: `last_bar_time` is the open time of the LAST
+                // bar of the chart's history — a CONSTANT across the whole
+                // script execution, even when iterating over historical bars.
+                // PineTS has the full preloaded series on `marketData`, so we
+                // read the absolute last bar's openTime there. Falling back
+                // to the progressively-fed `data.openTime` (current bar's
+                // time) is best-effort if marketData isn't available.
+                const md = _this.marketData;
+                if (Array.isArray(md) && md.length > 0) {
+                    return md[md.length - 1].openTime;
+                }
+                return _this.data.openTime.get(0);
             },
             get timenow() {
                 return new Date().getTime();
@@ -770,13 +781,27 @@ export class Context {
     //#region [Call Stack Management] ===========================
 
     private _callStack: string[] = [];
+    /**
+     * Cumulative call-path stack. Each entry is the full path from the root to
+     * the current call, formed by joining the syntactic call-site ids with '|'.
+     *
+     * Pine semantics is per-call-PATH (not per-syntactic-call-site): a function
+     * with internal `var` state, called via two distinct paths through a wrapper,
+     * must keep state independent per path. Keying lctx by the path (rather than
+     * the immediate site id) makes `$$.var.*` slots and `$$.id + '_taN'` ta
+     * callsite ids correctly path-scoped without any transpiler changes.
+     */
+    private _pathStack: string[] = [];
 
     /**
      * Pushes a call ID onto the stack
      * @param id - The call ID
      */
     public pushId(id: string) {
+        const parent = this._pathStack.length > 0 ? this._pathStack[this._pathStack.length - 1] : '';
+        const path = parent ? parent + '|' + id : id;
         this._callStack.push(id);
+        this._pathStack.push(path);
     }
 
     /**
@@ -784,13 +809,15 @@ export class Context {
      */
     public popId() {
         this._callStack.pop();
+        this._pathStack.pop();
     }
 
     /**
-     * Returns the current call ID from the top of the stack
+     * Returns the current call PATH (cumulative ids joined by '|') from the top
+     * of the stack. Used as the lctx key for the current function call.
      */
     public peekId() {
-        return this._callStack.length > 0 ? this._callStack[this._callStack.length - 1] : '';
+        return this._pathStack.length > 0 ? this._pathStack[this._pathStack.length - 1] : '';
     }
 
     /**

@@ -128,8 +128,20 @@ export function transformAssignmentExpression(node: any, scopeManager: ScopeMana
         { parent: node.right, inNamespaceCall: false },
         {
             Identifier(node: any, state: any, c: any) {
+                // Don't unwrap when the identifier is a namespace base in a
+                // constant access like `label.style_label_down`. NAMESPACES_LIKE
+                // mixes Series-wrapper names (time, na, dayofweek, …) with
+                // drawing namespaces (label, line, box, …); only the former
+                // have a .__value Series. For a member access where this
+                // identifier is the object, treat it as a plain namespace base.
+                const isNamespaceBase =
+                    state.parent &&
+                    state.parent.type === 'MemberExpression' &&
+                    !state.parent.computed &&
+                    state.parent.object === node;
+
                 // Rewrite NAMESPACES_LIKE entries (na, time, etc.) to $.get(__value, 0)
-                if (NAMESPACES_LIKE.includes(node.name) && scopeManager.isContextBound(node.name)) {
+                if (NAMESPACES_LIKE.includes(node.name) && scopeManager.isContextBound(node.name) && !isNamespaceBase) {
                     const originalName = node.name;
                     const valueExpr = {
                         type: 'MemberExpression',
@@ -400,6 +412,25 @@ export function transformVariableDeclaration(varNode: any, scopeManager: ScopeMa
                             c(node.left, { parent: node });
                             c(node.right, { parent: node });
                         },
+                        // LogicalExpression (`and`/`or`) and UnaryExpression
+                        // (`not`/unary `-`) need explicit visitors here so the
+                        // parent reference threaded into their children is the
+                        // expression itself — not the surrounding decl.init.
+                        // Without this, an Identifier inside `not a and not b`
+                        // sees state.parent === LogicalExpression instead of
+                        // UnaryExpression, the "unwrap as series-operand" path
+                        // never fires, and the JS emits `!a && !b` (always
+                        // false because `a`/`b` are Series objects).
+                        LogicalExpression(node: any, state: any, c: any) {
+                            if (node.left.type === 'Identifier') node.left.parent = node;
+                            if (node.right.type === 'Identifier') node.right.parent = node;
+                            c(node.left, { parent: node });
+                            c(node.right, { parent: node });
+                        },
+                        UnaryExpression(node: any, state: any, c: any) {
+                            if (node.argument.type === 'Identifier') node.argument.parent = node;
+                            c(node.argument, { parent: node });
+                        },
                         MemberExpression(node: any, state: any, c: any) {
                             // Set parent reference
                             if (node.object && node.object.type === 'Identifier') {
@@ -644,6 +675,15 @@ export function transformVariableDeclaration(varNode: any, scopeManager: ScopeMa
             walk.recursive(decl.init.body, scopeManager, {
                 IfStatement(node: any, state: ScopeManager, c: any) {
                     state.pushScope('if');
+                    // Transform the test condition. Without this, an if-test
+                    // inside an arrow-function body never gets walked — the
+                    // function-arg-unwrap path is skipped, and patterns like
+                    // `if not a and not b` (very common in Pine) emit JS
+                    // `if (!a && !b)` where `a`/`b` are Series objects (always
+                    // truthy → `!Series === false` → branch never taken).
+                    if (node.test) {
+                        transformExpression(node.test, state);
+                    }
                     c(node.consequent, state);
                     if (node.alternate) {
                         state.pushScope('els');
@@ -982,8 +1022,58 @@ export function transformExpression(node: any, scopeManager: ScopeManager): void
         CallExpression(node: any, state: ScopeManager) {
             transformCallExpression(node, state);
         },
+        // BinaryExpression / LogicalExpression / UnaryExpression need explicit
+        // visitors here so parent references are threaded into the operand
+        // identifiers. Without this, an Identifier inside `not a and not b`
+        // (a common Pine pattern in if-conditions) ends up with `node.parent`
+        // pointing at the outer LogicalExpression — or at nothing at all —
+        // and `transformIdentifier` skips its localSeriesVar unwrap because
+        // the `is(NamespaceMember|ParamCall|SeriesFunctionArg|...)` guards
+        // misclassify the node. The result is JS like `!a && !b`, which
+        // always evaluates to `false` because `a`/`b` are Series objects.
+        BinaryExpression(node: any, state: ScopeManager, c: any) {
+            if (node.left.type === 'Identifier') node.left.parent = node;
+            if (node.right.type === 'Identifier') node.right.parent = node;
+            c(node.left, state);
+            c(node.right, state);
+        },
+        LogicalExpression(node: any, state: ScopeManager, c: any) {
+            if (node.left.type === 'Identifier') node.left.parent = node;
+            if (node.right.type === 'Identifier') node.right.parent = node;
+            c(node.left, state);
+            c(node.right, state);
+        },
+        UnaryExpression(node: any, state: ScopeManager, c: any) {
+            if (node.argument.type === 'Identifier') node.argument.parent = node;
+            c(node.argument, state);
+        },
         Identifier(node: any, state: ScopeManager) {
+            // Capture parent BEFORE transformIdentifier mutates `node` in
+            // place (Object.assign overwrites node.parent on rewrites such as
+            // wrap-in-$.get).
+            const parent = node.parent;
+            const isUnary = parent && parent.type === 'UnaryExpression';
+            const isBinary = parent && parent.type === 'BinaryExpression';
+            const isLogical = parent && parent.type === 'LogicalExpression';
+            const isConditional = parent && parent.type === 'ConditionalExpression';
+
             transformIdentifier(node, state);
+
+            // After identifier rewrite, if the node still looks like a bare
+            // Identifier sitting under a `not`/`and`/`or`/binary/conditional
+            // expression, force-wrap it with `$.get(..., 0)` so function-
+            // parameter Series get unwrapped to scalars before the operator
+            // applies. Without this, `if not a and not b` (with `a`/`b` as
+            // bool fn params) emits `!a && !b` — Series objects are truthy,
+            // so `!Series === false` and the branch is never taken.
+            if (node.type === 'Identifier' && (isUnary || isBinary || isLogical || isConditional)) {
+                const isGetCall = parent && parent.type === 'CallExpression' && parent.callee &&
+                    parent.callee.object && parent.callee.object.name === CONTEXT_NAME &&
+                    parent.callee.property?.name === 'get';
+                if (!isGetCall) {
+                    addArrayAccess(node, state);
+                }
+            }
 
             //context bound variable was not transformed, but we still need to ensure array annotation
             const isIfStatement = scopeManager.getCurrentScopeType() === 'if';
@@ -1219,6 +1309,16 @@ export function transformReturnStatement(node: any, scopeManager: ScopeManager):
                     },
                     MemberExpression(node: any) {
                         transformMemberExpression(node, '', scopeManager);
+                    },
+                    // When an arrow function's last statement is an assignment
+                    // (e.g. `tracker.field := …`), the parser folds it into the
+                    // implicit return as an AssignmentExpression. Without this
+                    // visitor, the default acorn-walk fall-through visits the
+                    // LHS as a MemberExpression — which doesn't rewrite the
+                    // root identifier of an assignment LHS — and `tracker`
+                    // leaks bare → "ReferenceError: tracker is not defined".
+                    AssignmentExpression(node: any, state: ScopeManager) {
+                        transformAssignmentExpression(node, state);
                     },
                     // c is the callback function for recursion (acorn-walk)
                     CallExpression(node: any, state: ScopeManager, c: any) {

@@ -11,6 +11,38 @@ const UNDEFINED_ARG = {
     name: 'undefined',
 };
 
+/**
+ * Build the third argument to a `*.param(value, idx, name)` call. The
+ * statically-allocated `pN` string is unique across the script, but
+ * `Context.param` stores the resulting series in `context.params[name]` —
+ * a globally-keyed map — so two distinct call paths through the same
+ * function body would clobber each other (the function body bakes in
+ * the same `pN`, but each call writes a different value). Mirroring the
+ * existing ta-callsite-id convention (`$$.id + '_taN'`), we prefix the
+ * static `pN` with the current call-path id when inside a fn scope so
+ * each path writes to its own `params[path|pN]` slot. At top level
+ * `$$` doesn't exist, so we fall back to the literal `pN`.
+ */
+function makeParamNameArg(scopeManager: ScopeManager, paramId: string): any {
+    const literal = { type: 'Identifier', name: `'${paramId}'` };
+    // Use any-fn-scope-on-stack rather than `getCurrentScopeType() === 'fn'`
+    // — params can be emitted from inside if/for/while/switch nested inside
+    // a function body, where the immediate scope is e.g. 'if' but `$$` is
+    // still the function's local context.
+    if (!scopeManager.isInsideFunctionScope()) return literal;
+    const [localCtxName] = scopeManager.getVariable('$$');
+    if (!localCtxName) return literal;
+    return {
+        type: 'BinaryExpression',
+        operator: '+',
+        left: ASTFactory.createMemberExpression(
+            ASTFactory.createLocalContextIdentifier(),
+            ASTFactory.createIdentifier('id'),
+        ),
+        right: literal,
+    };
+}
+
 export function createScopedVariableReference(name: string, scopeManager: ScopeManager): any {
     const [scopedName, kind] = scopeManager.getVariable(name);
 
@@ -67,11 +99,26 @@ export function transformArrayIndex(node: any, scopeManager: ScopeManager): void
 
         // Only transform if it's not a context-bound variable
         if (!scopeManager.isContextBound(node.property.name)) {
-            // Transform property to $.kind.scopedName
-            node.property = createScopedVariableReference(node.property.name, scopeManager);
+            // Local series var (e.g. function parameter) used as an index:
+            // keep as a bare identifier wrapped with $.get(param, 0). Mirrors
+            // the same handling at the loop-variable case above and the
+            // object-position case below. Without this branch, a function
+            // param used as a history-lookback index (e.g. `high[size]` where
+            // `size` is a fn param) is mis-scoped to `$.let.size_$0`, which
+            // is undefined → resolves to 0 → `high[size]` returns the current
+            // bar instead of the bar `size` ago, breaking pivot-detection
+            // idioms like `high[size] > ta.highest(size)`.
+            if (scopeManager.isLocalSeriesVar(node.property.name)) {
+                const plainIdentifier = ASTFactory.createIdentifier(node.property.name);
+                plainIdentifier._skipTransformation = true;
+                node.property = ASTFactory.createGetCall(plainIdentifier, 0);
+            } else {
+                // Transform property to $.kind.scopedName
+                node.property = createScopedVariableReference(node.property.name, scopeManager);
 
-            // Add [0] to the index: $.get($.kind.scopedName, 0)
-            node.property = ASTFactory.createGetCall(node.property, 0);
+                // Add [0] to the index: $.get($.kind.scopedName, 0)
+                node.property = ASTFactory.createGetCall(node.property, 0);
+            }
         }
     }
 
@@ -854,7 +901,7 @@ function getParamFromConditionalExpression(node: any, scopeManager: ScopeManager
     const paramCall = {
         type: 'CallExpression',
         callee: memberExpr,
-        arguments: [node, UNDEFINED_ARG, { type: 'Identifier', name: `'${nextParamId}'` }],
+        arguments: [node, UNDEFINED_ARG, makeParamNameArg(scopeManager, nextParamId)],
         _transformed: true,
         _isParamCall: true,
     };
@@ -915,7 +962,12 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
             arg = getParamFromUnaryExpression(arg, scopeManager, namespace);
             break;
         case 'ArrayExpression':
-            // Transform each element in the array
+            // Transform each element in the array. Non-Identifier elements
+            // (e.g. nested calls like `ta.sma(volume, maLenInput)` inside a
+            // `request.security_lower_tf(..., [open, close, ta.sma(...)])`
+            // tuple) must also be transformed so their nested identifiers
+            // get scoped — otherwise `maLenInput` leaks bare and throws
+            // "ReferenceError: maLenInput is not defined" at runtime.
             arg.elements = arg.elements.map((element: any) => {
                 if (element.type === 'Identifier') {
                     // Transform identifiers to use $.get(variable, 0)
@@ -931,6 +983,28 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
                     }
                     // It's a user variable - transform to context reference
                     return createScopedVariableAccess(element.name, scopeManager);
+                }
+                // Recurse into non-Identifier elements using the same helpers
+                // the outer switch uses when these shapes appear at top level.
+                if (element.type === 'CallExpression') {
+                    transformCallExpression(element, scopeManager);
+                    return element;
+                }
+                if (element.type === 'BinaryExpression') {
+                    return getParamFromBinaryExpression(element, scopeManager, namespace);
+                }
+                if (element.type === 'LogicalExpression') {
+                    return getParamFromLogicalExpression(element, scopeManager, namespace);
+                }
+                if (element.type === 'ConditionalExpression') {
+                    return getParamFromConditionalExpression(element, scopeManager, namespace);
+                }
+                if (element.type === 'UnaryExpression') {
+                    return getParamFromUnaryExpression(element, scopeManager, namespace);
+                }
+                if (element.type === 'MemberExpression') {
+                    transformMemberExpression(element, namespace, scopeManager);
+                    return element;
                 }
                 return element;
             });
@@ -1055,7 +1129,7 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
         const paramCall = {
             type: 'CallExpression',
             callee: memberExpr,
-            arguments: [transformedObject, transformedProperty, { type: 'Identifier', name: `'${nextParamId}'` }],
+            arguments: [transformedObject, transformedProperty, makeParamNameArg(scopeManager, nextParamId)],
             _transformed: true,
             _isParamCall: true,
         };
@@ -1211,7 +1285,7 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
             const paramCall = {
                 type: 'CallExpression',
                 callee: memberExpr,
-                arguments: [arg, UNDEFINED_ARG, { type: 'Identifier', name: `'${nextParamId}'` }],
+                arguments: [arg, UNDEFINED_ARG, makeParamNameArg(scopeManager, nextParamId)],
                 _transformed: true,
                 _isParamCall: true,
             };
@@ -1242,7 +1316,7 @@ export function transformFunctionArgument(arg: any, namespace: string, scopeMana
     const paramCall = {
         type: 'CallExpression',
         callee: memberExpr,
-        arguments: [transformedArg, UNDEFINED_ARG, { type: 'Identifier', name: `'${nextParamId}'` }],
+        arguments: [transformedArg, UNDEFINED_ARG, makeParamNameArg(scopeManager, nextParamId)],
         _transformed: true,
         _isParamCall: true,
     };

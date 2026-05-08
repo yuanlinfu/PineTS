@@ -1,5 +1,26 @@
 # Change Log
 
+## [0.9.15] - 2026-05-08 - Titled Enums, Call-Path Isolation & `request.security_lower_tf` Optimizations
+
+### Added
+
+- **Titled enums**: Support for enum declarations with explicit titles aligned with Pine Script (**transpiler / runtime**).
+
+### Fixed
+
+- **`transformFunctionArgument` + array expressions**: **`ArrayExpression`** arguments now recurse into non-**`Identifier`** elements (**`CallExpression`**, **`BinaryExpression`**, etc.) so nested identifiers (e.g. **`maLenInput`** inside **`request.security_lower_tf(..., [volume, ta.sma(volume, maLenInput)])`**) get proper scope rewrites instead of leaking bare names and throwing **`ReferenceError`** at runtime.
+- **Transpiler “not defined” regressions**: Broader fixes for identifier / scope edge cases that surfaced as runtime **`ReferenceError`**s.
+- **Per-call-path state for user functions**: **`Context.peekId()`** maintains a **cumulative path stack** so **`var`** / **`let`** slots and **`ta.*`** accumulators do not leak across different call paths through a shared parametrized wrapper.
+- **`$.param(..., 'pN')` in nested calls**: Parameter slot ids inside function bodies are **path-prefixed with `$$.id`** so distinct call paths no longer share **`context.params[pN]`** (fixes wrong or missing internal lines in complex multi-path indicators).
+
+### Changed
+
+- **`request.security_lower_tf`**: Fetches a **bounded** number of lower-timeframe bars instead of over-fetching (**optimization**).
+- **Secondary contexts**: **Drawing** helpers are **skipped** when running **`request.security`** / LTF evaluation so work and payload generation stay on the chart context.
+- **`security_lower_tf` fast path**: When the expression only needs **market data** from the lower timeframe, execution takes a **lighter path** without full expression evaluation overhead.
+
+---
+
 ## [0.9.14] - 2026-05-05 - UDT & Transpiler Hardening, `request.security`, Streaming & Drawing `na`
 
 ### Added

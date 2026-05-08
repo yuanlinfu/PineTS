@@ -459,4 +459,49 @@ if barstate.isfirst
         expect(isNa(ln.color)).toBe(true);
         expect(ln.color).not.toBe('#2962ff');
     });
+
+    // Regression: `chart.point.new(time, na, price)` (idiomatic in TV-published
+    // indicators — e.g. SMC's drawStructure) used to resolve to `x = NaN`
+    // because `_resolvePoint` checked `point.index !== undefined` first
+    // (`NaN !== undefined` is true) and never fell through to the time path.
+    // Result: every line built from such chart points had x1=NaN/x2=NaN and
+    // didn't render in QFChart.
+    it('line.new(chart.point.new(time, na, price), …) resolves to time-based x1/x2', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', 30, new Date('2025-01-01').getTime(), new Date('2025-02-01').getTime());
+        const { plots } = await pineTS.run(`//@version=5
+indicator("probe", overlay = true)
+if barstate.isfirst
+    chart.point cp1 = chart.point.new(time, na, low)
+    chart.point cp2 = chart.point.new(time + 5*24*60*60*1000, na, low)
+    line.new(cp1, cp2, xloc.bar_time, color = color.green)
+`);
+        const ln = plots['__lines__']?.data?.[0]?.value?.[0];
+        expect(ln).toBeDefined();
+        expect(ln.xloc).toBe('bt');
+        // x1/x2 must be real timestamps, not NaN.
+        expect(typeof ln.x1).toBe('number');
+        expect(typeof ln.x2).toBe('number');
+        expect(Number.isNaN(ln.x1)).toBe(false);
+        expect(Number.isNaN(ln.x2)).toBe(false);
+        expect(ln.x2).toBeGreaterThan(ln.x1);
+    });
+
+    // Symmetric: `chart.point.new(na, bar_index, price)` must resolve via
+    // the index path even when `time` slot is NaN.
+    it('line.new(chart.point.new(na, bar_index, price), …) resolves to index-based x1/x2', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', 30, new Date('2025-01-01').getTime(), new Date('2025-02-01').getTime());
+        const { plots } = await pineTS.run(`//@version=5
+indicator("probe", overlay = true)
+if barstate.isfirst
+    chart.point cp1 = chart.point.new(na, bar_index, low)
+    chart.point cp2 = chart.point.new(na, bar_index + 5, low)
+    line.new(cp1, cp2, xloc.bar_index, color = color.red)
+`);
+        const ln = plots['__lines__']?.data?.[0]?.value?.[0];
+        expect(ln).toBeDefined();
+        expect(ln.xloc).toBe('bi');
+        expect(Number.isNaN(ln.x1)).toBe(false);
+        expect(Number.isNaN(ln.x2)).toBe(false);
+        expect(ln.x2).toBe(ln.x1 + 5);
+    });
 });

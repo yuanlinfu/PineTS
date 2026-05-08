@@ -828,6 +828,87 @@ plot(volume, "_v")
         expect(secHigh[0].value).toBeCloseTo(8752.45, 1);
         expect(secLow[0].value).toBeCloseTo(7441.21, 1);
     }, 30000);
+
+    // Regression: array-literal arguments to request.security_lower_tf used
+    // to only rewrite bare-Identifier elements. Nested CallExpressions like
+    // `ta.sma(volume, maLenInput)` passed through untouched, so the global
+    // `let maLenInput` reference inside leaked bare and threw
+    // "ReferenceError: maLenInput is not defined" at runtime.
+    it('request.security_lower_tf accepts a tuple with nested ta.sma(volume, globalLet)', async () => {
+        const sDate = new Date('2024-06-01').getTime();
+        const eDate = new Date('2024-06-15').getTime();
+        const warmup = 365 * 24 * 60 * 60 * 1000;
+
+        const pineTS = new PineTS(Provider.Binance, 'BTCUSDC', 'D', null, sDate - warmup);
+
+        // Must NOT throw "maLenInput is not defined" during the run.
+        const { plots } = await pineTS.run(
+`//@version=6
+indicator("LTF nested call")
+int maLenInput = input.int(20, "MA Length", minval = 5)
+[ltfV, ltfVma] = request.security_lower_tf(syminfo.tickerid, "60", [volume, ta.sma(volume, maLenInput)])
+plot(not na(ltfV) ? ltfV.size() : 0,   "_n")
+plot(not na(ltfVma) ? ltfVma.size() : 0, "_m")
+`);
+
+        const sizes = plots['_n']?.data || [];
+        const matchedSizes = plots['_m']?.data || [];
+        // Both arrays must populate (the LTF "60" inside a "D" chart yields
+        // multiple LTF bars per chart bar — non-zero on most days).
+        const inWindow = sizes.filter((e: any) => e.time >= sDate && e.time <= eDate);
+        expect(inWindow.length).toBeGreaterThan(0);
+        // At least one bar in the window must report a non-empty LTF tuple
+        // for both raw and ta.sma(...) channels.
+        expect(inWindow.some((e: any) => e.value > 0)).toBe(true);
+        const matchedInWindow = matchedSizes.filter((e: any) => e.time >= sDate && e.time <= eDate);
+        expect(matchedInWindow.some((e: any) => e.value > 0)).toBe(true);
+    }, 60000);
+
+    // Regression: cross-symbol request at the chart's timeframe must fetch
+    // the requested symbol's data, not return the chart symbol's expression
+    // verbatim. The same-TF shortcut used to fire on timeframe match alone
+    // and skip building the secondary context for the requested ticker —
+    // returning BTC's close for an `request.security("ETHUSDC", ...)` call.
+    it('request.security("ETHUSDC", chart_tf, close) returns ETH close, not chart symbol close', async () => {
+        const sDate = new Date('2024-06-01').getTime();
+        const eDate = new Date('2024-08-15').getTime();
+        const warmup = 365 * 24 * 60 * 60 * 1000;
+
+        const pineTS = new PineTS(Provider.Binance, 'BTCUSDC', 'W', null, sDate - warmup);
+
+        const { plots } = await pineTS.run(
+`//@version=6
+indicator("Cross-symbol same-TF")
+float eth_close_chartTF = request.security("ETHUSDC", timeframe.period, close)
+float chart_close_self  = request.security(syminfo.tickerid, timeframe.period, close)
+plot(close,            "_btc")
+plot(eth_close_chartTF, "_eth")
+plot(chart_close_self,  "_self")
+`);
+
+        const btc  = extractPlot(plots, '_btc',  sDate, eDate);
+        const eth  = extractPlot(plots, '_eth',  sDate, eDate);
+        const self_ = extractPlot(plots, '_self', sDate, eDate);
+
+        expect(btc.length).toBeGreaterThan(0);
+        expect(eth.length).toBe(btc.length);
+        expect(self_.length).toBe(btc.length);
+
+        // Spot check: 2024-06 BTC weekly is ~$60-70k, ETH weekly is ~$3-4k.
+        // The requested ETH value must NOT equal BTC's close on any bar
+        // (which is what the bug produced).
+        for (let i = 0; i < btc.length; i++) {
+            // ETH weekly close in this window is < $5k; BTC weekly close > $50k.
+            // So an order-of-magnitude separation makes the assertion robust to
+            // small price drift.
+            expect(eth[i].value).toBeLessThan(10000);
+            expect(btc[i].value).toBeGreaterThan(50000);
+            expect(eth[i].value).not.toBeCloseTo(btc[i].value, -2);
+
+            // Same-symbol same-TF shortcut still valid: must equal chart's close.
+            expect(self_[i].value).toBeCloseTo(btc[i].value, 2);
+        }
+    }, 60000);
 });
 
 /**

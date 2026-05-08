@@ -443,4 +443,28 @@ if barstate.isfirst
         expect(bx.bgcolor).not.toBe('#2962ff');
         expect(bx.border_color).not.toBe('#2962ff');
     });
+
+    // Regression: `box.new(chart.point.new(time, na, price), …)` used to
+    // resolve to `left = NaN`/`right = NaN` because `_resolvePoint` returned
+    // x = NaN when the index slot was NaN (NaN !== undefined). Boxes
+    // existed but couldn't render at any specific bar.
+    it('box.new(chart.point.new(time, na, price), …) resolves to time-based left/right', async () => {
+        const pineTS = new PineTS(Provider.Mock, 'BTCUSDC', 'D', 30, new Date('2025-01-01').getTime(), new Date('2025-02-01').getTime());
+
+        const { plots } = await pineTS.run(`//@version=5
+indicator("probe", overlay = true)
+if barstate.isfirst
+    chart.point cp1 = chart.point.new(time, na, low)
+    chart.point cp2 = chart.point.new(time + 5*24*60*60*1000, na, low * 1.1)
+    box.new(cp1, cp2, xloc = xloc.bar_time, bgcolor = color.new(color.green, 80))
+`);
+        const bx = plots['__boxes__']?.data?.[0]?.value?.[0];
+        expect(bx).toBeDefined();
+        expect(bx.xloc).toBe('bt');
+        expect(typeof bx.left).toBe('number');
+        expect(typeof bx.right).toBe('number');
+        expect(Number.isNaN(bx.left)).toBe(false);
+        expect(Number.isNaN(bx.right)).toBe(false);
+        expect(bx.right).toBeGreaterThan(bx.left);
+    });
 });

@@ -168,10 +168,20 @@ export function security(context: any) {
             throw new Error('Invalid timeframe');
         }
 
-        if (ctxTimeframeIdx === reqTimeframeIdx) {
-            // Same-timeframe shortcut: resolve any helper objects (TimeComponentHelper,
-            // NAHelper, Series, etc.) in the expression that haven't been extracted
-            // to their primitive values yet.
+        // Same-timeframe shortcut is only valid when the requested symbol is the
+        // chart's symbol — at that point the secondary would just re-evaluate the
+        // same data. If the symbol differs, the shortcut would return the chart's
+        // expression verbatim (e.g. BTC close) for a request meant to fetch a
+        // different ticker (e.g. ETH close). Fall through to the secondary-context
+        // path (line ~280+) which builds a fresh PineTS instance for `_symbol`.
+        const ctxRawSymbol = typeof context.tickerId === 'string' && context.tickerId.includes(':')
+            ? context.tickerId.split(':')[1]
+            : context.tickerId;
+        const isSameSymbol = !_symbol || _symbol === '' || _symbol === ctxRawSymbol;
+
+        if (ctxTimeframeIdx === reqTimeframeIdx && isSameSymbol) {
+            // Resolve any helper objects (TimeComponentHelper, NAHelper, Series, etc.)
+            // in the expression that haven't been extracted to their primitive values yet.
             const resolved = resolveExprValue(_expression);
             return Array.isArray(resolved) ? [resolved] : resolved;
         }

@@ -434,8 +434,17 @@ export class Parser {
         return baseType; // Simple type: "float", "int", etc.
     }
 
-    // Parse enum definition: enum Name \n member1 \n member2 \n ...
-    // Generates: const Name = { member1: 'Name.member1', member2: 'Name.member2', ... }
+    // Parse enum definition. Supports both Pine v6 forms:
+    //   enum X            (untitled — bare member names)
+    //       a
+    //       b
+    //   enum Y            (titled — `member = "title"`)
+    //       a = "Alpha"
+    //       b = "Beta"
+    //
+    // Runtime value matches TradingView's str.tostring(EnumName.member):
+    //   - titled: the title string verbatim (incl. empty `""`)
+    //   - untitled: just the member name (e.g. "a", NOT "X.a")
     parseEnumDefinition() {
         this.expect(TokenType.KEYWORD, 'enum');
         const name = this.expect(TokenType.IDENTIFIER).value;
@@ -443,7 +452,7 @@ export class Parser {
         this.skipNewlines();
         this.expect(TokenType.INDENT);
 
-        const members: string[] = [];
+        const members: { name: string; title: string | null }[] = [];
         while (!this.match(TokenType.DEDENT) && !this.match(TokenType.EOF)) {
             this.skipNewlines();
             if (this.match(TokenType.DEDENT)) break;
@@ -453,7 +462,12 @@ export class Parser {
             }
 
             const memberName = this.expect(TokenType.IDENTIFIER).value;
-            members.push(memberName);
+            let memberTitle: string | null = null;
+            if (this.match(TokenType.OPERATOR, '=')) {
+                this.advance(); // consume '='
+                memberTitle = this.expect(TokenType.STRING).value;
+            }
+            members.push({ name: memberName, title: memberTitle });
             this.skipNewlines();
         }
 
@@ -461,8 +475,10 @@ export class Parser {
             this.advance();
         }
 
-        // Generate: const Name = { member1: 'Name.member1', ... }
-        const props = members.map((m) => new Property(new Identifier(m), new Literal(`${name}.${m}`)));
+        // Generate: const Name = { member: title-or-name, ... }
+        const props = members.map((m) =>
+            new Property(new Identifier(m.name), new Literal(m.title !== null ? m.title : m.name)),
+        );
         const objExpr = new ObjectExpression(props);
         return new VariableDeclaration(
             [new VariableDeclarator(new Identifier(name), objExpr)],

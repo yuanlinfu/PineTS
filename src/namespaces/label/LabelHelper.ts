@@ -5,6 +5,7 @@ import { parseArgsForPineParams } from '../utils';
 import { LabelObject } from './LabelObject';
 import { ChartPointObject } from '../chart/ChartPointObject';
 import { NAHelper } from '../Core';
+import { silentInSecondary } from '../silentInSecondary';
 
 //prettier-ignore
 const LABEL_NEW_SIGNATURES = [
@@ -151,6 +152,7 @@ export class LabelHelper {
     // Supports two signatures:
     //   label.new(x, y, text, xloc, yloc, color, style, textcolor, size, textalign, tooltip, text_font_family, force_overlay)
     //   label.new(point, text, xloc, yloc, color, style, textcolor, size, textalign, tooltip, text_font_family, force_overlay)
+    @silentInSecondary
     new(...args: any[]): LabelObject {
         const parsed = parseArgsForPineParams<any>(args, LABEL_NEW_SIGNATURES, LABEL_NEW_ARGS_TYPES);
 
@@ -160,11 +162,16 @@ export class LabelHelper {
 
         if (parsed.point instanceof ChartPointObject) {
             const pt = parsed.point as ChartPointObject;
-            if (pt.index !== undefined) {
-                x = pt.index;
+            // Treat NaN as "not provided" — see set_point() comment for context.
+            const hasIndex = pt.index !== undefined &&
+                !(typeof pt.index === 'number' && isNaN(pt.index));
+            const hasTime = pt.time !== undefined &&
+                !(typeof pt.time === 'number' && isNaN(pt.time));
+            if (hasIndex) {
+                x = pt.index!;
                 xloc = xloc || 'bi';
-            } else if (pt.time !== undefined) {
-                x = pt.time;
+            } else if (hasTime) {
+                x = pt.time!;
                 xloc = xloc || 'bt';
             } else {
                 x = 0;
@@ -204,14 +211,17 @@ export class LabelHelper {
 
     // --- Setter methods ---
 
+    @silentInSecondary
     set_x(id: LabelObject, x: number): void {
         if (id && !id._deleted) id.x = x;
     }
 
+    @silentInSecondary
     set_y(id: LabelObject, y: number): void {
         if (id && !id._deleted) id.y = y;
     }
 
+    @silentInSecondary
     set_xy(id: LabelObject, x: number, y: number): void {
         if (id && !id._deleted) {
             id.x = x;
@@ -219,49 +229,69 @@ export class LabelHelper {
         }
     }
 
+    @silentInSecondary
     set_text(id: LabelObject, text: string): void {
         if (id && !id._deleted) id.text = text;
     }
 
+    @silentInSecondary
     set_color(id: LabelObject, color: string): void {
         if (id && !id._deleted) id.color = color;
     }
 
+    @silentInSecondary
     set_textcolor(id: LabelObject, textcolor: string): void {
         if (id && !id._deleted) id.textcolor = textcolor;
     }
 
+    @silentInSecondary
     set_size(id: LabelObject, size: string): void {
         if (id && !id._deleted) id.size = size;
     }
 
+    @silentInSecondary
     set_style(id: LabelObject, style: string): void {
         if (id && !id._deleted) id.style = style;
     }
 
+    @silentInSecondary
     set_textalign(id: LabelObject, textalign: string): void {
         if (id && !id._deleted) id.textalign = textalign;
     }
 
+    @silentInSecondary
     set_tooltip(id: LabelObject, tooltip: string): void {
         if (id && !id._deleted) id.tooltip = tooltip;
     }
 
+    @silentInSecondary
     set_xloc(id: LabelObject, xloc: string): void {
         if (id && !id._deleted) id.xloc = xloc;
     }
 
+    @silentInSecondary
     set_yloc(id: LabelObject, yloc: string): void {
         if (id && !id._deleted) id.yloc = yloc;
     }
 
+    @silentInSecondary
     set_point(id: LabelObject, point: ChartPointObject): void {
         if (id && !id._deleted && point) {
-            if (point.index !== undefined) {
-                id.x = point.index;
+            // Treat NaN as "not provided" so `chart.point.new(time, na, price)`
+            // and `chart.point.new(na, bar_index, price)` (idiomatic in TV-
+            // published indicators, e.g. SMC's drawHighLowSwings) correctly
+            // resolve to whichever coord is actually set. Without the NaN
+            // check, `point.index !== undefined` is true for NaN and the
+            // label silently lands at x=NaN, hiding it from the chart.
+            const hasIndex = point.index !== undefined &&
+                !(typeof point.index === 'number' && isNaN(point.index));
+            const hasTime = point.time !== undefined &&
+                !(typeof point.time === 'number' && isNaN(point.time));
+            if (hasIndex) {
+                id.x = point.index!;
                 id.xloc = 'bi';
-            } else if (point.time !== undefined) {
-                id.x = point.time;
+            } else if (hasTime) {
+                id.x = point.time!;
                 id.xloc = 'bt';
             }
             id.y = point.price;
@@ -284,6 +314,7 @@ export class LabelHelper {
 
     // --- Management methods ---
 
+    @silentInSecondary
     copy(id: LabelObject): LabelObject | undefined {
         if (!id) return undefined;
         const lbl = id.copy();
@@ -295,6 +326,7 @@ export class LabelHelper {
         return lbl;
     }
 
+    @silentInSecondary
     delete(id: LabelObject): void {
         if (id) id._deleted = true;
     }
