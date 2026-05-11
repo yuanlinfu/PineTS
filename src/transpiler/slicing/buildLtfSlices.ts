@@ -33,7 +33,7 @@
 
 import * as astring from 'astring';
 
-const SLICING_TARGETS = new Set(['security_lower_tf']);
+const SLICING_TARGETS = new Set(['security_lower_tf', 'security']);
 
 const AST_SKIP_KEYS = new Set([
     'type', 'loc', 'start', 'end', 'range', 'parent',
