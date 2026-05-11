@@ -1,5 +1,5 @@
 // Known Pine Script namespaces that might be used as functions or objects
-export const KNOWN_NAMESPACES = ['ta', 'math', 'request', 'array', 'input', 'color'];
+export const KNOWN_NAMESPACES = ['ta', 'math', 'request', 'array', 'input', 'color', 'ticker'];
 
 // This is used to transform ns() calls to ns.any() calls
 // Entries with a __value property also support dual-use as variables (e.g. time, na)

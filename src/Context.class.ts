@@ -27,6 +27,7 @@ import { BoxHelper } from './namespaces/box/BoxHelper';
 import { LinefillHelper } from './namespaces/linefill/LinefillHelper';
 import { PolylineHelper } from './namespaces/polyline/PolylineHelper';
 import { TableHelper } from './namespaces/table/TableHelper';
+import { Ticker } from './namespaces/Ticker';
 import type { IndicatorOptions } from './types/PineTypes';
 
 export class Context {
@@ -199,6 +200,7 @@ export class Context {
             array: new PineArray(this),
             map: new PineMap(this),
             matrix: new PineMatrix(this),
+            ticker: new Ticker(this),
 
             syminfo: null,
             timeframe: new Timeframe(this),
@@ -761,17 +763,23 @@ export class Context {
         if (source == null) return [];
         // PineArrayObject wraps the underlying JS array as `.array`
         if (Array.isArray(source.array)) return source.array;
+        // PineMapObject wraps a JS Map as `.map` — iterating yields [key, value]
+        // pairs (Pine's `for v in map` semantics).
+        if (source.map instanceof Map) return source.map;
         return source;
     }
 
     /**
-     * Resolve an iterable yielding [index, value] tuples for `for [i, x] in collection`
+     * Resolve an iterable yielding [key, value] tuples for `for [k, v] in collection`
      * destructuring codegen. PineArrayObject's [Symbol.iterator] yields scalar values, so
-     * we must explicitly call `.entries()` on the underlying array.
+     * we must explicitly call `.entries()` on the underlying array. PineMapObject stores
+     * its data on `.map` (a JS Map) — without this branch the fallthrough returned an
+     * empty iterator and `for [k,v] in map` silently iterated 0 times.
      */
-    entries(source: any): IterableIterator<[number, any]> {
+    entries(source: any): IterableIterator<[any, any]> {
         if (source == null) return [].entries();
         if (Array.isArray(source.array)) return source.array.entries();
+        if (source.map instanceof Map) return source.map.entries();
         if (Array.isArray(source)) return source.entries();
         // Map / Set / other iterables that already yield tuples
         if (typeof source.entries === 'function') return source.entries();
