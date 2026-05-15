@@ -1,5 +1,5 @@
 // Known Pine Script namespaces that might be used as functions or objects
-export const KNOWN_NAMESPACES = ['ta', 'math', 'request', 'array', 'input', 'color'];
+export const KNOWN_NAMESPACES = ['ta', 'math', 'request', 'array', 'input', 'color', 'ticker'];
 
 // This is used to transform ns() calls to ns.any() calls
 // Entries with a __value property also support dual-use as variables (e.g. time, na)
@@ -34,6 +34,25 @@ export const NAMESPACES_LIKE = [
 
 // Async methods that require await keyword (format: 'namespace.method')
 export const ASYNC_METHODS = ['request.security', 'request.security_lower_tf'];
+
+// Host-bound Pine built-ins whose values come from the UI/host environment (viewport,
+// theme, chart-type) rather than from market data. PineTS provides sensible defaults
+// (e.g. visible range = full loaded marketData range), but a consumer can override
+// them at runtime via PineTS.setVisibleRange() and similar setters.
+//
+// A script that references ANY of these is "host-dependent": its output may change
+// when the host's state changes, so re-runs are required after setter calls.
+// Scripts that don't reference these are unaffected — their re-run on setter changes
+// can be skipped entirely (see PineTS.usesVisibleRange()).
+//
+// Detection: post-transpile regex scan of the function body string. Comments are
+// stripped during pine2js, so this is comment-safe. Each entry is matched as a
+// whole-word identifier-path (\b-anchored), so `chart.left_visible_bar_time` is a hit
+// but a user identifier accidentally containing the substring is not.
+export const VIEWPORT_DEPENDENT_BUILTINS = [
+    'chart.left_visible_bar_time',
+    'chart.right_visible_bar_time',
+];
 
 // Factory methods that create objects with side effects (format: 'namespace.method')
 // When used inside `var` declarations, these calls are wrapped in arrow functions

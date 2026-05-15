@@ -16,6 +16,8 @@ This guide explains how to initialize PineTS and run indicators or strategies wi
 -   [Initialization Options](#initialization-options)
 -   [The run() Method](#the-run-method)
 -   [The stream() Method](#the-stream-method)
+-   [The update() Method](#the-update-method)
+-   [Host Environment (Visible Range)](#host-environment-visible-range)
 -   [Context Object](#context-object)
 -   [Return Values](#return-values)
 -   [Alerts](#alerts)
@@ -368,6 +370,120 @@ evt.on('error', (error) => {
 | `'alert'` | `{ type, message, title?, freq?, bar_index, time }` | Alert or alertcondition fired |
 | `'warning'` | `{ message, method?, bar }` | Non-blocking runtime warning |
 | `'error'` | `Error` | Fatal error (script halted) |
+
+---
+
+## The update() Method
+
+`update()` is a smart wrapper around `run()` that skips execution when the
+output cannot have changed. Use it instead of `run()` in event-driven flows
+(viewport changes, settings tweaks, etc.) so non-affected indicators are
+free to call.
+
+### Syntax
+
+```typescript
+const context = await pineTS.update(
+    pineTSCode?: Indicator | Function | String,
+): Promise<Context>
+```
+
+### Behavior
+
+| Call | Action |
+| --- | --- |
+| First call (no cached result) | Executes — equivalent to `run()`. `pineTSCode` is required here. |
+| Subsequent call, script **does not** use visible-range built-ins | Returns the cached `Context` immediately (no work). |
+| Subsequent call, script uses visible-range AND viewport changed since last cached run | Re-executes against the new viewport, returns fresh `Context`. |
+| Subsequent call, viewport unchanged | Returns the cached `Context`. |
+
+The `pineTSCode` argument is optional after the first call — the previously
+seen code is reused. Pass it again only when the script source itself
+changes.
+
+### Example
+
+```typescript
+const pine = new PineTS(Provider.Binance, 'BTCUSDT', '1W', 500);
+
+// First call: behaves like run()
+await pine.update(code);
+
+// User pans the chart → host computes new visible range
+pine.setVisibleRange(t1, t2);
+await pine.update();   // re-runs ONLY if the script uses visible-range
+
+// User pans again, but to the same range
+await pine.update();   // returns cached result, no compute
+```
+
+---
+
+## Host Environment (Visible Range)
+
+PineTS is renderer-agnostic — it has no UI. But Pine Script has a small set
+of built-ins whose values come from the chart's UI state (the user's current
+zoom/pan), notably:
+
+| Pine built-in | PineTS behavior |
+| --- | --- |
+| `chart.left_visible_bar_time` | Defaults to `marketData[0].openTime`; host can override via `setVisibleRange()` |
+| `chart.right_visible_bar_time` | Defaults to `marketData[marketData.length - 1].openTime`; host can override |
+
+For most scripts these are unused, and the defaults are "the full loaded
+range is the viewport" — perfectly defensible since PineTS does compute over
+everything it loaded. For scripts that *do* reference them (e.g. LuxAlgo's
+Supply-and-Demand Visible Range), a host like QFChart can wire its actual
+viewport in.
+
+### `setVisibleRange(left: number, right: number)`
+
+Stores host viewport values. The setter only updates internal state; it
+does not trigger a re-run by itself. Call `update()` afterwards to apply.
+
+```typescript
+pine.setVisibleRange(
+    new Date('2024-01-01').getTime(),
+    new Date('2024-06-30').getTime(),
+);
+await pine.update(code);
+```
+
+### `usesVisibleRange(): boolean`
+
+Static-analysis flag set during transpile. Returns `true` if the loaded
+script references any visible-range built-in.
+
+Use this to short-circuit fan-out logic across many indicators on one
+chart — only viewport-dependent indicators need re-runs on user zoom:
+
+```typescript
+function onChartPan(left, right) {
+    for (const p of indicators) {
+        if (!p.usesVisibleRange()) continue;   // skip — output unaffected
+        p.setVisibleRange(left, right);
+        chart.clear();                          // QFChart helper
+        const ctx = await p.update();
+        chart.addIndicator(p.id, ctx.plots);
+    }
+}
+```
+
+Detection is performed by scanning the transpiled function body (comments
+are stripped during pine2js, so accidental references inside comments do
+not flip the flag).
+
+### `visibleRangeLeft` / `visibleRangeRight` getters
+
+Read back the current values stored by `setVisibleRange()`. Return
+`undefined` when the setter has never been called (the default-falls-back
+case).
+
+### Streaming integration
+
+`stream()` already handles continuous data input. Combining `stream()`
+with `setVisibleRange()` is a planned follow-up — for the batch path,
+use `run()` / `update()`.
 
 ---
 

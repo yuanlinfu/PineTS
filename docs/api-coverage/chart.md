@@ -29,8 +29,8 @@ parent: API Coverage
 
 | Function                       | Status | Description            |
 | ------------------------------ | ------ | ---------------------- |
-| `chart.left_visible_bar_time`  |        | Left visible bar time  |
-| `chart.right_visible_bar_time` |        | Right visible bar time |
+| `chart.left_visible_bar_time`  | ✅     | Left visible bar time  |
+| `chart.right_visible_bar_time` | ✅     | Right visible bar time |
 
 ### Chart Point
 
@@ -49,3 +49,7 @@ parent: API Coverage
 | `chart.point.index`  | ✅     | Bar index of point  |
 | `chart.point.price`  | ✅     | Price of point      |
 | `chart.point.time`   | ✅     | Timestamp of point  |
+
+### Notes
+
+- **`left_visible_bar_time` / `right_visible_bar_time`** — In TradingView these reflect the user's UI viewport (what's scrolled into view). PineTS is renderer-agnostic, so by default they fall back to the first/last bar of the loaded `marketData` (i.e. "the full loaded range is the viewport"). Hosts that render PineTS output and want to model a true zoom/pan can override via `PineTS.setVisibleRange(left, right)`. Use `PineTS.usesVisibleRange()` to skip viewport-change re-runs for indicators that don't reference these built-ins; `PineTS.update(code)` is a smart re-run helper that gates on this tag automatically.

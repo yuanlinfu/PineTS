@@ -55,6 +55,7 @@ import { wrapInContextFunction } from './transformers/WrapperTransformer';
 import { transformNestedArrowFunctions, preProcessContextBoundVars, preProcessUdtRegistry, runAnalysisPass } from './analysis/AnalysisPass';
 import { runTransformationPass, transformEqualityChecks, propagateAsyncAwait } from './transformers/MainTransformer';
 import { extractPineScriptVersion, pineToJS } from './pineToJS/pineToJS.index';
+import { buildLtfSlices } from './slicing/buildLtfSlices';
 
 function getPineTSFromSource(source: string | Function): string {
     if (typeof source === 'function') {
@@ -180,6 +181,23 @@ export function transpile(source: string | Function, options: { debug: boolean; 
         comments: debug,
     });
 
+    // Slice every `request.security_lower_tf` call site. Each slice is a
+    // pre-built async Function whose body is the user-script prefix up
+    // through and including the call. Stashed on the returned function
+    // (PineTS picks them up at run time and propagates onto the
+    // Context). Slicing is read-only over the AST and is safe to do
+    // alongside / after the main code-generation pass.
+    //
+    // Disabled via the PINETS_DISABLE_LTF_SLICING env var (used in
+    // tooling that needs to exercise the legacy full-script slow path,
+    // e.g. correctness comparisons).
+    const slicingDisabled = (typeof process !== 'undefined') && process?.env?.PINETS_DISABLE_LTF_SLICING === '1';
+    const slices = slicingDisabled ? {} : buildLtfSlices(ast);
+
     const _wraperFunction = new Function('', `var _r = ${transformedCode}\n; return _r;`);
-    return _wraperFunction(this);
+    const mainFn = _wraperFunction(this);
+    if (slices && Object.keys(slices).length > 0) {
+        (mainFn as any)._ltfSlices = slices;
+    }
+    return mainFn;
 }

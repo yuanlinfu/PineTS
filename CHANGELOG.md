@@ -1,5 +1,24 @@
 # Change Log
 
+## [0.9.16] - 2026-05-13 - `request.security*` Script Slicing, `ticker.*` Namespace & Chart Visible Range
+
+### Added
+
+- **`ticker.*` namespace**: Implemented **`ticker.new`**, **`ticker.modify`**, **`ticker.inherit`**, **`ticker.standard`**, plus the chart-type constructors (**`ticker.heikinashi`**, **`ticker.renko`**, **`ticker.kagi`**, **`ticker.linebreak`**, **`ticker.pointfigure`**). Output ticker-id strings match TradingView's exact log form for the plain "no-modifier" cases used by virtually every real-world script. Chart-type modifiers are accepted but silently dropped at the **`request.security`** boundary (PineTS data providers serve standard candles only — documented as a known divergence). Bound on `Context.pine.ticker` with the standard **`param()`** wrapper for series/scalar argument handling.
+- **Chart visible range (host environment)**: New **`PineTS.setVisibleRange(left, right)`** setter and **`visibleRangeLeft`** / **`visibleRangeRight`** getters lets a host (chart UI) feed the user's current zoom/pan into the runtime. Pine built-ins **`chart.left_visible_bar_time`** and **`chart.right_visible_bar_time`** read from those values, falling back to **`marketData[0]/[last].openTime`** when the host never calls the setter.
+- **`PineTS.update()` smart re-run**: New `update(pineTSCode?)` wraps **`run()`** with viewport-change-aware caching — returns the cached **`Context`** unless the script statically references a viewport-dependent built-in **AND** the viewport changed since the last cached run. `pineTSCode` is optional after the first call. Designed for event-driven flows fanning a viewport change across many indicators: non-viewport-dependent instances are free.
+- **`usesVisibleRange()` static detection**: Flagged at transpile time by post-codegen scan against **`VIEWPORT_DEPENDENT_BUILTINS`** (`chart.left_visible_bar_time`, `chart.right_visible_bar_time`). Lets fan-out consumers skip **`update()`** entirely on indicators whose output cannot change with the viewport.
+- **`docs/initialization-and-usage.md`**: New sections "**The update() Method**" and "**Host Environment (Visible Range)**" documenting the new APIs and behavior table.
+
+### Changed
+
+- **`request.security_lower_tf` — sliced secondary execution**: The transpiler emits a per-call **truncated AST slice** (statements up to and including the call) compiled into a standalone async function, stashed on the returned indicator function as **`_ltfSlices`** and propagated onto **`Context`**. At runtime the slow path now calls **`pineTS.runPretranspiled(slice)`** instead of re-running the full user script in the secondary context — large reduction in wasted work whenever the script does post-call processing. Falls back to the legacy full-script path when no slice is available (e.g. uncovered AST shapes). Disable with **`PINETS_DISABLE_LTF_SLICING=1`** for correctness comparisons.
+- **Slicing through nested user functions**: The slice walker path-projects into single-level **`FunctionDeclaration`** bodies — when a `request.security*` call lives inside a user function, the emitted slice keeps the (truncated) function definition plus the earliest top-level **`$.call(fnRef, …)`** invocation. UDT type definitions and `var`-declared instance constructors come along as top-level statements before the call site. UFCS methods (compiled as **`$M_`**-prefixed FunctionDeclarations) are sliced by the same code path.
+- **`request.security` — sliced secondary execution**: `request.security` now consumes the same `_ltfSlices` table as **`request.security_lower_tf`**. Slice keys are the bare static `pN`; the runtime strips the path-prefix from **`_expression_name`** (added in [0.9.15]) before slice lookup so calls nested inside user functions resolve correctly. Falls back to the full-script path when no slice is registered.
+- **`for k, v in map` iteration**: **`Context.iter()`** and **`Context.entries()`** now recognize **`PineMapObject`** (data on **`.map`** — a JS `Map`) and yield `[key, value]` pairs. Previously the fallthrough returned an empty iterator and `for [k,v] in map` silently iterated 0 times.
+
+---
+
 ## [0.9.15] - 2026-05-08 - Titled Enums, Call-Path Isolation & `request.security_lower_tf` Optimizations
 
 ### Added

@@ -13,8 +13,8 @@
     "chart.is_standard": true
   },
   "Visible Range": {
-    "chart.left_visible_bar_time": false,
-    "chart.right_visible_bar_time": false
+    "chart.left_visible_bar_time": true,
+    "chart.right_visible_bar_time": true
   },
   "Chart Point": {
     "chart.point.copy()": true,

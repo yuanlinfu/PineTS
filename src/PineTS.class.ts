@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 Alaa-eddine KADDOURI
 import { transpile } from '@pinets/transpiler/index';
+import { VIEWPORT_DEPENDENT_BUILTINS } from '@pinets/transpiler/settings';
 import { IProvider, ISymbolInfo } from './marketData/IProvider';
 import { Context } from './Context.class';
 import { Series } from './Series';
@@ -105,6 +106,100 @@ export class PineTS {
      */
     public setAlertMode(mode: 'realtime' | 'all') {
         this._alertMode = mode;
+    }
+
+    // ── Visible-range / host environment ────────────────────────────────
+    // Values come from the host (UI). When unset, Pine built-ins like
+    // `chart.left_visible_bar_time` fall back to marketData-derived defaults
+    // (first/last loaded bar's openTime).
+    private _viewportLeft: number | undefined = undefined;
+    private _viewportRight: number | undefined = undefined;
+
+    // Set by _transpileCode() via static analysis of the transpiled output.
+    // True iff the script references any built-in in VIEWPORT_DEPENDENT_BUILTINS.
+    // Consumers should check this before re-running on viewport changes — non-
+    // viewport-dependent scripts produce identical output regardless of viewport.
+    private _usesVisibleRange: boolean = false;
+
+    // Snapshot of viewport at the time of the last update()-cached run, used to
+    // decide whether an update() call can return the cached result.
+    private _lastRunViewport: { left?: number; right?: number } = {};
+    private _lastResult: Context | null = null;
+    private _lastPineTSCode: Indicator | Function | String | null = null;
+
+    /**
+     * Set the visible range of bars from the host (e.g. chart UI viewport).
+     * Affects `chart.left_visible_bar_time` and `chart.right_visible_bar_time`.
+     * Defaults derive from `marketData[0]/[last].openTime` if never called.
+     *
+     * The setter only stores values; it does NOT trigger a re-run. Call
+     * `update()` afterwards to apply the change. For scripts that don't
+     * reference visible-range built-ins, `update()` is a no-op.
+     *
+     * @param left  openTime of the leftmost visible bar
+     * @param right openTime of the rightmost visible bar
+     */
+    public setVisibleRange(left: number, right: number): void {
+        this._viewportLeft = left;
+        this._viewportRight = right;
+    }
+
+    /**
+     * Whether the loaded script references any visible-range built-in
+     * (e.g. `chart.left_visible_bar_time`). Detected statically during
+     * transpile. Consumers fanning viewport changes across many indicators
+     * should skip non-tagged instances to avoid unnecessary re-runs.
+     */
+    public usesVisibleRange(): boolean {
+        return this._usesVisibleRange;
+    }
+
+    /** Current viewport left (undefined if setter never called). */
+    public get visibleRangeLeft(): number | undefined {
+        return this._viewportLeft;
+    }
+
+    /** Current viewport right (undefined if setter never called). */
+    public get visibleRangeRight(): number | undefined {
+        return this._viewportRight;
+    }
+
+    /**
+     * Smart re-run: executes `run()` only if a re-run is actually needed.
+     *
+     * - First call: behaves like `run()` (always executes).
+     * - Subsequent calls: returns the cached previous result UNLESS the script
+     *   is viewport-dependent (`usesVisibleRange()`) AND the viewport has
+     *   changed since the last cached run.
+     *
+     * The typical pattern for a chart consumer with multiple indicators:
+     *
+     *     // user pans the chart
+     *     for (const p of indicators) {
+     *         p.setVisibleRange(left, right);
+     *         await p.update(code);   // no-op for non-viewport indicators
+     *     }
+     *
+     * The pineTSCode argument is optional after the first call — the same code
+     * is reused. Pass it again only when the script source itself has changed.
+     */
+    public async update(pineTSCode?: Indicator | Function | String): Promise<Context> {
+        const codeToRun = pineTSCode ?? this._lastPineTSCode;
+        if (!codeToRun) {
+            throw new Error('pine.update(): pineTSCode is required on the first call.');
+        }
+
+        const isFirstRun = this._lastResult === null;
+        const viewportChanged = this._viewportLeft !== this._lastRunViewport.left
+            || this._viewportRight !== this._lastRunViewport.right;
+
+        const needsRun = isFirstRun || (this._usesVisibleRange && viewportChanged);
+        if (!needsRun) return this._lastResult as Context;
+
+        this._lastPineTSCode = codeToRun;
+        this._lastRunViewport = { left: this._viewportLeft, right: this._viewportRight };
+        this._lastResult = (await this.run(codeToRun)) as Context;
+        return this._lastResult;
     }
 
     constructor(
@@ -353,12 +448,43 @@ export class PineTS {
      * Run the script completely and return the final context (backward compatible behavior)
      * @private
      */
+    /**
+     * Run an already-transpiled PineTS function in this instance — no
+     * additional transpile/parse pass. Used by `request.security_lower_tf`'s
+     * slow path to execute the slice produced at primary-transpile time
+     * (a truncated body containing only the prefix up to the call). The
+     * caller is responsible for ensuring `transpiledFn` was produced by
+     * this transpiler against the same source — calling this with an
+     * arbitrary function is unsafe.
+     */
+    public async runPretranspiled(transpiledFn: Function, inputs: Record<string, any> = {}, periods?: number): Promise<Context> {
+        await this.ready();
+        if (!periods) periods = this.data.length;
+
+        const context = this._initializeContext(null as any, inputs, this._isSecondaryContext);
+        this._transpiledCode = transpiledFn;
+        // Preserve slice attribution on the context so any nested LTF
+        // request inside the slice can keep using the same map.
+        const slices = (transpiledFn as any)._ltfSlices;
+        if (slices) (context as any)._ltfTruncatedBodies = slices;
+
+        await this._executeIterations(context, this._transpiledCode, this.data.length - periods, this.data.length);
+
+        return context;
+    }
+
     private async _runComplete(pineTSCode: Function | String, inputs: Record<string, any>, periods?: number): Promise<Context> {
         await this.ready();
         if (!periods) periods = this.data.length;
 
         const context = this._initializeContext(pineTSCode, inputs, this._isSecondaryContext);
         this._transpiledCode = this._transpileCode(pineTSCode);
+        // Propagate transpile-time slices (one per request.security_lower_tf
+        // call site) onto the Context so the slow path of the LTF runtime
+        // can pick the right truncated body to run in the secondary
+        // instead of the FULL user script.
+        const slices = (this._transpiledCode as any)._ltfSlices;
+        if (slices) (context as any)._ltfTruncatedBodies = slices;
 
         await this._executeIterations(context, this._transpiledCode, this.data.length - periods, this.data.length);
 
@@ -383,6 +509,8 @@ export class PineTS {
 
         const context = this._initializeContext(pineTSCode, inputs, this._isSecondaryContext);
         this._transpiledCode = this._transpileCode(pineTSCode);
+        const slices = (this._transpiledCode as any)._ltfSlices;
+        if (slices) (context as any)._ltfTruncatedBodies = slices;
 
         const startIdx = this.data.length - periods;
         let processedUpToIdx = startIdx; // Track what we've fully processed
@@ -862,6 +990,10 @@ export class PineTS {
         if (this._chartTimezone) {
             context.chartTimezone = this._chartTimezone;
         }
+        // Host-bound viewport overrides (chart.left/right_visible_bar_time).
+        // Undefined values mean "use marketData-derived defaults" — see ChartHelper.
+        context.viewportLeft = this._viewportLeft;
+        context.viewportRight = this._viewportRight;
 
         context.__maxLoops = this._maxLoops;
         context._alertMode = this._alertMode;
@@ -891,7 +1023,31 @@ export class PineTS {
      */
     private _transpileCode(pineTSCode: Function | String): Function {
         const transformer = transpile.bind(this);
-        return transformer(pineTSCode, this._debugSettings);
+        const fn = transformer(pineTSCode, this._debugSettings);
+        this._usesVisibleRange = this._detectViewportUsage(fn);
+        return fn;
+    }
+
+    /**
+     * Static analysis on the transpiled function body to detect references to
+     * host-bound built-ins (currently visible-range; extensible via
+     * VIEWPORT_DEPENDENT_BUILTINS). Comments are stripped during pine2js, so
+     * scanning the post-transpile output is comment-safe.
+     *
+     * Why post-transpile (not regex on Pine source): a `chart.left_visible_bar_time`
+     * literal inside a // comment would be a false positive at the source level.
+     * After pine2js, only live code remains.
+     *
+     * Why regex (not AST visitor): `chart` is a reserved namespace in
+     * KNOWN_NAMESPACES — Pine scripts cannot shadow it with a local identifier,
+     * so a whole-word match on `chart.<prop>` is unambiguous.
+     */
+    private _detectViewportUsage(fn: Function): boolean {
+        const body = fn.toString();
+        return VIEWPORT_DEPENDENT_BUILTINS.some((name) => {
+            const escaped = name.replace(/\./g, '\\.');
+            return new RegExp(`\\b${escaped}\\b`).test(body);
+        });
     }
 
     /**

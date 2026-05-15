@@ -27,6 +27,7 @@ import { BoxHelper } from './namespaces/box/BoxHelper';
 import { LinefillHelper } from './namespaces/linefill/LinefillHelper';
 import { PolylineHelper } from './namespaces/polyline/PolylineHelper';
 import { TableHelper } from './namespaces/table/TableHelper';
+import { Ticker } from './namespaces/Ticker';
 import type { IndicatorOptions } from './types/PineTypes';
 
 export class Context {
@@ -122,6 +123,12 @@ export class Context {
     public eDate: number;
     public fullContext: Context;
 
+    // Host-bound viewport state. PineTS.setVisibleRange() flows these in via
+    // _initializeContext. Undefined means "no override" — ChartHelper falls
+    // back to marketData[0]/[last].openTime.
+    public viewportLeft: number | undefined = undefined;
+    public viewportRight: number | undefined = undefined;
+
     public pineTSCode: Function | String;
 
     public inputs: Record<string, any> = {};
@@ -199,6 +206,7 @@ export class Context {
             array: new PineArray(this),
             map: new PineMap(this),
             matrix: new PineMatrix(this),
+            ticker: new Ticker(this),
 
             syminfo: null,
             timeframe: new Timeframe(this),
@@ -299,6 +307,18 @@ export class Context {
             is_range: chartHelper.is_range.bind(chartHelper),
             is_renko: chartHelper.is_renko.bind(chartHelper),
             point: chartHelper.point,
+            // Visible-range built-ins. Host (e.g. chart UI) overrides via
+            // PineTS.setVisibleRange(); fallback is the loaded data range.
+            get left_visible_bar_time() {
+                if (_this.viewportLeft !== undefined) return _this.viewportLeft;
+                const md = _this.marketData;
+                return Array.isArray(md) && md.length > 0 ? md[0].openTime : NaN;
+            },
+            get right_visible_bar_time() {
+                if (_this.viewportRight !== undefined) return _this.viewportRight;
+                const md = _this.marketData;
+                return Array.isArray(md) && md.length > 0 ? md[md.length - 1].openTime : NaN;
+            },
         };
 
         // label namespace
@@ -761,17 +781,23 @@ export class Context {
         if (source == null) return [];
         // PineArrayObject wraps the underlying JS array as `.array`
         if (Array.isArray(source.array)) return source.array;
+        // PineMapObject wraps a JS Map as `.map` — iterating yields [key, value]
+        // pairs (Pine's `for v in map` semantics).
+        if (source.map instanceof Map) return source.map;
         return source;
     }
 
     /**
-     * Resolve an iterable yielding [index, value] tuples for `for [i, x] in collection`
+     * Resolve an iterable yielding [key, value] tuples for `for [k, v] in collection`
      * destructuring codegen. PineArrayObject's [Symbol.iterator] yields scalar values, so
-     * we must explicitly call `.entries()` on the underlying array.
+     * we must explicitly call `.entries()` on the underlying array. PineMapObject stores
+     * its data on `.map` (a JS Map) — without this branch the fallthrough returned an
+     * empty iterator and `for [k,v] in map` silently iterated 0 times.
      */
-    entries(source: any): IterableIterator<[number, any]> {
+    entries(source: any): IterableIterator<[any, any]> {
         if (source == null) return [].entries();
         if (Array.isArray(source.array)) return source.array.entries();
+        if (source.map instanceof Map) return source.map.entries();
         if (Array.isArray(source)) return source.entries();
         // Map / Set / other iterables that already yield tuples
         if (typeof source.entries === 'function') return source.entries();
